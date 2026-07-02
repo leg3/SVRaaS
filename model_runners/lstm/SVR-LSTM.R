@@ -58,9 +58,9 @@ n_test <- 84   # ~7 years
 
 # Create modeling dataframe (monthly, ordered, no missing y)
 df_all <- log_diagnostic_ratio_series %>%
-  select(date, y = log_ratio_raw) %>%
+  select(date, y_raw = log_ratio_raw) %>%
   arrange(date) %>%
-  filter(!is.na(y))
+  filter(!is.na(y_raw))
 
 # Total number of observations
 n <- nrow(df_all)
@@ -76,19 +76,18 @@ train_df <- df_all[1:(i_test_start - 1), ]
 test_df  <- df_all[i_test_start:n, ]
 
 # Fit scaler parameters on TRAIN only (leakage-safe)
-scaler_mu <- mean(train_df$y, na.rm = TRUE)
-scaler_sd <- sd(train_df$y, na.rm = TRUE)
+scaler_mu <- mean(train_df$y_raw, na.rm = TRUE)
+scaler_sd <- sd(train_df$y_raw, na.rm = TRUE)
 
 # Sanity check: scaler must be finite and sd must be > 0
 stopifnot(is.finite(scaler_mu), is.finite(scaler_sd), scaler_sd > 0)
 
 # Scale each split using TRAIN mu/sd
-train_y_scaled <- (train_df$y - scaler_mu) / scaler_sd
-test_y_scaled  <- (test_df$y  - scaler_mu) / scaler_sd
+train_df <- train_df %>%
+  mutate(y_scaled = (y_raw - scaler_mu) / scaler_sd)
 
-# Overwrite y for downstream modeling (all modeling uses scaled y)
-train_df$y <- train_y_scaled
-test_df$y  <- test_y_scaled
+test_df <- test_df %>%
+  mutate(y_scaled = (y_raw - scaler_mu) / scaler_sd)
 
 # make_supervised()
 # Given a univariate series, build:
@@ -148,9 +147,9 @@ make_pred_tbl <- function(model,
 
   out <- tibble(
     date = dates,
-    y = y_vec,
-    y_hat = y_hat,
-    resid = resid,
+    y_scaled = y_vec,
+    y_hat_scaled = y_hat,
+    resid_scaled = resid,
     lag_window = lag_window,
     horizon = h,
     split = which_split
@@ -160,8 +159,8 @@ make_pred_tbl <- function(model,
   if (!is.null(scaler_mu) && !is.null(scaler_sd)) {
     out <- out %>%
       mutate(
-        y_raw     = y * scaler_sd + scaler_mu,
-        y_hat_raw = y_hat * scaler_sd + scaler_mu,
+        y_raw = y_scaled * scaler_sd + scaler_mu,
+        y_hat_raw = y_hat_scaled * scaler_sd + scaler_mu,
         resid_raw = y_raw - y_hat_raw
       )
   }
@@ -202,8 +201,8 @@ for (lag_window in lag_grid) {
     #   - X is a 3D array: (samples, lag_window, 1)
     #   - y is the horizon target vector
     # ---------------------------------------------------------------
-    sup_train <- make_supervised(train_df$y, lag_window, h)
-    sup_test  <- make_supervised(test_df$y, lag_window, h)
+    sup_train <- make_supervised(train_df$y_scaled, lag_window, h)
+    sup_test  <- make_supervised(test_df$y_scaled, lag_window, h)
 
     # Keras expects y as a 2D array for this setup: (samples, 1)
     y_train <- matrix(sup_train$y, ncol = 1)
