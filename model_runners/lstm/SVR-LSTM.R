@@ -27,9 +27,34 @@ library(keras3)
 # Set seed
 set.seed(599)
 
+# Set dates for expanding time window
+umcsent_start_date <- "1990-01-01"
+vix_start_date  <- "1990-01-02"
+data_end_date   <- Sys.Date()
+
 # Retreive data from FRED
-volatility_series <- get_fred("VIXCLS", "1990-01-02", "2025-12-31")
-sentiment_series <- get_fred("UMCSENT", "1990-01-01", "2025-12-31")
+volatility_series <- get_fred("VIXCLS", vix_start_date, data_end_date)
+sentiment_series  <- get_fred("UMCSENT", umcsent_start_date, data_end_date)
+
+# Determine latest complete calendar month
+latest_complete_month <- as.Date(floor_date(data_end_date, "month") - months(1))
+
+# Determine latest available sentiment month
+latest_sentiment_month <- as.Date(max(sentiment_series$date, na.rm = TRUE))
+
+# Use the latest month that is both complete and available in sentiment
+latest_model_month <- as.Date(min(latest_complete_month, latest_sentiment_month))
+
+# Convert model month to last day of that month for daily VIX trimming
+latest_model_month_end <- as.Date(ceiling_date(latest_model_month, "month") - days(1))
+
+# Trim sentiment to latest usable month
+sentiment_series <- sentiment_series %>%
+  filter(date <= latest_model_month)
+
+# Trim daily VIX before monthly averaging
+volatility_series <- volatility_series %>%
+  filter(date <= latest_model_month_end)
 
 # Monthly mean of VIX
 mean_volatility_series <- volatility_series %>%
@@ -344,7 +369,7 @@ lstm_h3_series <- preds_lstm %>%
 
 
 # Recession shading: build start/end intervals from USREC (0/1)
-recession_series <- get_fred("USREC", "1990", "2025-12-31" )
+recession_series <- get_fred("USREC", umcsent_start_date, latest_model_month_end)
 recession_bands <- recession_series %>%
   mutate(rec = value == 1) %>%
   arrange(date) %>%
