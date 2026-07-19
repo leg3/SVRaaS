@@ -454,8 +454,8 @@ jsonlite::write_json(
   digits = NA
 )
 
-# CSV Export
-write_csv(metrics_lstm_result, "LSTM Metrics SELECTED FINAL.csv")
+# Optional CSV validation export
+# write_csv(metrics_lstm_result, "LSTM Metrics - Model Runner.csv")
 
-# Print metrics table
-metrics_lstm_result
+# Optional console validation
+# metrics_lstm_result
