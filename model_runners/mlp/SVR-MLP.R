@@ -27,6 +27,22 @@ library(keras3)
 # Set seed
 set.seed(599)
 
+# Resolve latest complete and aligned model window
+resolve_model_window <- function(sentiment_series, data_end_date = Sys.Date()) {
+  latest_complete_month <- as.Date(floor_date(data_end_date, "month") - months(1))
+  latest_sentiment_month <- as.Date(max(sentiment_series$date, na.rm = TRUE))
+  latest_model_month <- as.Date(min(latest_complete_month, latest_sentiment_month))
+  latest_model_month_end <- as.Date(ceiling_date(latest_model_month, "month") - days(1))
+
+  list(
+    data_end_date = as.Date(data_end_date),
+    latest_complete_month = latest_complete_month,
+    latest_sentiment_month = latest_sentiment_month,
+    latest_model_month = latest_model_month,
+    latest_model_month_end = latest_model_month_end
+  )
+}
+
 # Set dates for expanding time window
 umcsent_start_date <- "1990-01-01"
 vix_start_date  <- "1990-01-02"
@@ -37,21 +53,15 @@ volatility_series <- get_fred("VIXCLS", vix_start_date, data_end_date)
 sentiment_series  <- get_fred("UMCSENT", umcsent_start_date, data_end_date)
 
 # Resolve complete and aligned model window
-latest_complete_month <- as.Date(
-  floor_date(data_end_date, "month") - months(1)
+model_window <- resolve_model_window(
+  sentiment_series = sentiment_series,
+  data_end_date = data_end_date
 )
 
-latest_sentiment_month <- as.Date(
-  max(sentiment_series$date, na.rm = TRUE)
-)
-
-latest_model_month <- as.Date(
-  min(latest_complete_month, latest_sentiment_month)
-)
-
-latest_model_month_end <- as.Date(
-  ceiling_date(latest_model_month, "month") - days(1)
-)
+latest_complete_month <- model_window$latest_complete_month
+latest_sentiment_month <- model_window$latest_sentiment_month
+latest_model_month <- model_window$latest_model_month
+latest_model_month_end <- model_window$latest_model_month_end
 
 # Trim sentiment to latest usable month
 sentiment_series <- sentiment_series %>%
