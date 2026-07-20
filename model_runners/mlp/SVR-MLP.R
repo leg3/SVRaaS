@@ -57,9 +57,9 @@ n_test <- 84   # ~7 years
 
 # Create modeling dataframe (monthly, ordered, no missing y)
 df_all <- log_diagnostic_ratio_series %>%
-  select(date, y = log_ratio_raw) %>%
+  select(date, y_raw = log_ratio_raw) %>%
   arrange(date) %>%
-  filter(!is.na(y))
+  filter(!is.na(y_raw))
 
 # Total number of observations
 n <- nrow(df_all)
@@ -75,19 +75,18 @@ train_df <- df_all[1:(i_test_start - 1), ]
 test_df  <- df_all[i_test_start:n, ]
 
 # Fit scaler parameters on TRAIN only (leakage-safe)
-scaler_mu <- mean(train_df$y, na.rm = TRUE)
-scaler_sd <- sd(train_df$y, na.rm = TRUE)
+scaler_mu <- mean(train_df$y_raw, na.rm = TRUE)
+scaler_sd <- sd(train_df$y_raw, na.rm = TRUE)
 
 # Sanity check: scaler must be finite and sd must be > 0
 stopifnot(is.finite(scaler_mu), is.finite(scaler_sd), scaler_sd > 0)
 
 # Scale each split using TRAIN mu/sd
-train_y_scaled <- (train_df$y - scaler_mu) / scaler_sd
-test_y_scaled  <- (test_df$y  - scaler_mu) / scaler_sd
+train_df <- train_df %>%
+  mutate(y_scaled = (y_raw - scaler_mu) / scaler_sd)
 
-# Overwrite y for downstream modeling (all modeling uses scaled y)
-train_df$y <- train_y_scaled
-test_df$y  <- test_y_scaled
+test_df <- test_df %>%
+  mutate(y_scaled = (y_raw - scaler_mu) / scaler_sd)
 
 # make_supervised()
 # Given a univariate series, build:
@@ -142,9 +141,9 @@ make_pred_tbl <- function(model,
 
   out <- tibble(
     date = dates,
-    y = y_vec,
-    y_hat = y_hat,
-    resid = resid,
+    y_scaled = y_vec,
+    y_hat_scaled = y_hat,
+    resid_scaled = resid,
     lag_window = lag_window,
     horizon = h,
     split = which_split
@@ -154,8 +153,8 @@ make_pred_tbl <- function(model,
   if (!is.null(scaler_mu) && !is.null(scaler_sd)) {
     out <- out %>%
       mutate(
-        y_raw     = y * scaler_sd + scaler_mu,
-        y_hat_raw = y_hat * scaler_sd + scaler_mu,
+        y_raw = y_scaled * scaler_sd + scaler_mu,
+        y_hat_raw = y_hat_scaled * scaler_sd + scaler_mu,
         resid_raw = y_raw - y_hat_raw
       )
   }
@@ -168,14 +167,6 @@ set_random_seed(599)
 
 # Lag windows to evaluate (number of months used as inputs)
 lag_grid <- c(24, 18, 15, 12, 9, 6, 3)
-
-# # Collectors:
-# #   - results_mlp_list     : per-run metric rows (one row per lag_window × h)
-# #   - preds_mlp_val_list   : per-run prediction tables for validation split
-# #   - preds_mlp_list       : per-run prediction tables for test split
-# results_mlp_list    <- list()
-# preds_mlp_val_list  <- list()
-# preds_mlp_list      <- list()
 
 # Collectors:
 #   - results_mlp_list : per-run metric rows (one row per lag_window × h)
@@ -204,7 +195,7 @@ for (lag_window in lag_grid) {
     # Build supervised train set for this (lag_window, h)
     # ---------------------------------------------------------------
     train_supervised <- make_supervised(
-      series_values = train_df$y,
+      series_values = train_df$y_scaled,
       lag_window = lag_window,
       forecast_horizon = h
     )
@@ -258,7 +249,7 @@ for (lag_window in lag_grid) {
     # Build supervised test set and evaluate once (selected weights)
     # ---------------------------------------------------------------
     test_supervised <- make_supervised(
-      series_values = test_df$y,
+      series_values = test_df$y_scaled,
       lag_window = lag_window,
       forecast_horizon = h
     )
