@@ -459,8 +459,8 @@ jsonlite::write_json(
   digits = NA
 )
 
-# CSV Export
-write_csv(metrics_mlp_result, "MLP Metrics Latest.csv")
+# Optional CSV validation export
+# write_csv(metrics_mlp_result, "MLP Metrics - Model Runner.csv")
 
-# Print metrics table
-metrics_mlp_result
+# Optional console validation
+# metrics_mlp_result
