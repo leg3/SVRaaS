@@ -74,12 +74,6 @@ test_df  <- df_all[i_test_start:n, ]
 # Define rolling forecast horizons.  h = steps ahead
 h_list <- c(1, 3)
 
-# Define global start index for the test split inside of df_all Needed because
-# the rolling code maps split row k -> global row in df_all: target_global_idx =
-# split_start_idx + (k - 1) so we can slice df_all[1:origin_global_idx] for an
-# expanding window.
-test_start_idx <- i_test_start
-
 # Grid specification for ARIMA (p, d, q) model_id is just a label used
 # downstream in the results table. include_mean rule here: allow mean only when
 # d == 0 (stationary around a mean).
@@ -193,7 +187,7 @@ metrics_arima_long <- purrr::pmap_dfr(arima_grid, function(model_id, p, d, q, in
   eval_arima_model(
     df_all,
     test_df,
-    test_start_idx,
+    i_test_start,
     h_list,
     fit_fun  = fit_fun,
     model_id = model_id
