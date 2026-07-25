@@ -168,20 +168,21 @@ eval_arima_model <- function(df_all,
 
     # Summarize forecast accuracy metrics for test
     calc_arima_metrics(preds_test) %>%
-      mutate(
+      transmute(
         model_id = model_id,
-        split = "test",
-        horizon = h
+        horizon = h,
+        test_mse = mse,
+        test_rmse = rmse,
+        test_mae = mae
       )
-  }) %>%
-    select(model_id, split, horizon, mse, rmse, mae)
+  })
 }
 
 # OUTERMOST LOOP (over the ARIMA grid): For each row of arima_grid:
 #   - build a fit_fun for that (p,d,q,include_mean)
 #   - evaluate it via eval_arima_model()
-#   - row-bind results into one long table
-metrics_arima_long <- purrr::pmap_dfr(arima_grid, function(model_id, p, d, q, include_mean) {
+#   - row-bind results into one metrics table
+results_arima <- purrr::pmap_dfr(arima_grid, function(model_id, p, d, q, include_mean) {
   fit_fun <- make_fit_arima(p, d, q, include_mean)
 
   eval_arima_model(
@@ -194,20 +195,8 @@ metrics_arima_long <- purrr::pmap_dfr(arima_grid, function(model_id, p, d, q, in
   )
 })
 
-# Reshape long -> wide for readability: One row per (model_id, horizon), with
-# grouped test_* metric columns
-metrics_arima_result <- metrics_arima_long %>%
-  pivot_wider(
-    id_cols = c(model_id, horizon),
-    names_from  = split,
-    values_from = c(mse, rmse, mae),
-    names_glue  = "{split}_{.value}"
-  ) %>%
-  select(model_id,
-         horizon,
-         test_mse,
-         test_rmse,
-         test_mae) %>%
+# Rank ARIMA results by horizon and test MAE
+metrics_arima_result <- results_arima %>%
   arrange(horizon, test_mae)
 
 # CSV Export
