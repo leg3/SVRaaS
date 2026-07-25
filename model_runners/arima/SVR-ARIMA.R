@@ -250,6 +250,39 @@ selected_arima_models <- metrics_arima_result %>%
   ) %>%
   ungroup()
 
+# Attach ARIMA specifications to the selected models
+selected_arima_specs <- selected_arima_models %>%
+  select(model_id, horizon) %>%
+  left_join(
+    arima_grid,
+    by = "model_id"
+  )
+
+# Generate rolling predictions for the selected ARIMA models
+selected_arima_predictions <- purrr::pmap_dfr(
+  selected_arima_specs,
+  function(model_id, horizon, p, d, q, include_mean) {
+    fit_fun <- make_fit_arima(p, d, q, include_mean)
+
+    roll_preds_arima_split(
+      df_all = df_all,
+      split_df = test_df,
+      split_start_idx = i_test_start,
+      h = horizon,
+      fit_fun = fit_fun,
+      model_id = model_id
+    ) %>%
+      transmute(
+        model_id,
+        horizon = horizon,
+        date,
+        y,
+        y_hat,
+        resid
+      )
+  }
+)
+
 # CSV Export
 write_csv(metrics_arima_result, "ARIMA Metrics FINAL.csv")
 metrics_arima_result
