@@ -67,8 +67,7 @@ stopifnot(n_test < n)
 # relative to df_all.
 i_test_start <- n - n_test + 1
 
-# Subset df_all into training and test sets
-train_df <- df_all[1:(i_test_start - 1), ]
+# Subset df_all into the fixed test set
 test_df  <- df_all[i_test_start:n, ]
 
 # Define rolling forecast horizons.  h = steps ahead
