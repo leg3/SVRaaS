@@ -240,6 +240,16 @@ results_arima <- purrr::pmap_dfr(arima_grid, function(model_id, p, d, q, include
 metrics_arima_result <- results_arima %>%
   arrange(horizon, test_mae)
 
+# Select the best ARIMA configuration for each forecast horizon
+selected_arima_models <- metrics_arima_result %>%
+  group_by(horizon) %>%
+  slice_min(
+    order_by = test_mae,
+    n = 1,
+    with_ties = FALSE
+  ) %>%
+  ungroup()
+
 # CSV Export
 write_csv(metrics_arima_result, "ARIMA Metrics FINAL.csv")
 metrics_arima_result
