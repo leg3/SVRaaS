@@ -148,7 +148,7 @@ roll_preds_arima_split <- function(df_all,
 }
 
 # Define function to calculate forecast accuracy metrics
-calc_nn_metrics <- function(preds_tbl) {
+calc_arima_metrics <- function(preds_tbl) {
   tibble(
     mse  = mean((preds_tbl$resid)^2, na.rm = TRUE),
     rmse = sqrt(mean((preds_tbl$resid)^2, na.rm = TRUE)),
@@ -162,7 +162,7 @@ calc_nn_metrics <- function(preds_tbl) {
 #
 # This is the MIDDLE LOOP (over horizons), and it calls the INNER LOOP
 # (rolling over time) via roll_preds_arima_split().
-eval_model_arima_nn <- function(df_all,
+eval_arima_model <- function(df_all,
                                 test_df,
                                 test_start_idx,
                                 h_list,
@@ -173,7 +173,7 @@ eval_model_arima_nn <- function(df_all,
     preds_test <- roll_preds_arima_split(df_all, test_df, test_start_idx, h, fit_fun, model_id)
 
     # Summarize forecast accuracy metrics for test
-    calc_nn_metrics(preds_test) %>%
+    calc_arima_metrics(preds_test) %>%
       mutate(
         model_id = model_id,
         split = "test",
@@ -185,12 +185,12 @@ eval_model_arima_nn <- function(df_all,
 
 # OUTERMOST LOOP (over the ARIMA grid): For each row of arima_grid:
 #   - build a fit_fun for that (p,d,q,include_mean)
-#   - evaluate it via eval_model_arima_nn()
+#   - evaluate it via eval_arima_model()
 #   - row-bind results into one long table
-metrics_arima_nn_long <- purrr::pmap_dfr(arima_grid, function(model_id, p, d, q, include_mean) {
+metrics_arima_long <- purrr::pmap_dfr(arima_grid, function(model_id, p, d, q, include_mean) {
   fit_fun <- make_fit_arima(p, d, q, include_mean)
 
-  eval_model_arima_nn(
+  eval_arima_model(
     df_all,
     test_df,
     test_start_idx,
@@ -202,7 +202,7 @@ metrics_arima_nn_long <- purrr::pmap_dfr(arima_grid, function(model_id, p, d, q,
 
 # Reshape long -> wide for readability: One row per (model_id, horizon), with
 # grouped test_* metric columns
-metrics_arima_nn_wide <- metrics_arima_nn_long %>%
+metrics_arima_result <- metrics_arima_long %>%
   pivot_wider(
     id_cols = c(model_id, horizon),
     names_from  = split,
@@ -217,5 +217,5 @@ metrics_arima_nn_wide <- metrics_arima_nn_long %>%
   arrange(horizon, test_mae)
 
 # CSV Export
-write_csv(metrics_arima_nn_wide, "ARIMA Metrics FINAL.csv")
-metrics_arima_nn_wide
+write_csv(metrics_arima_result, "ARIMA Metrics FINAL.csv")
+metrics_arima_result
