@@ -203,6 +203,16 @@ metrics_ar_result <- purrr::map_dfr(p_grid, function(p0) {
 }) %>%
   arrange(horizon, test_mae)
 
+# Select the best AR configuration for each forecast horizon
+selected_ar_models <- metrics_ar_result %>%
+  group_by(horizon) %>%
+  slice_min(
+    order_by = test_mae,
+    n = 1,
+    with_ties = FALSE
+  ) %>%
+  ungroup()
+
 # CSV Export
 write_csv(metrics_ar_result, "AR Metrics FINAL.csv")
 metrics_ar_result
