@@ -243,6 +243,77 @@ selected_ar_predictions <- purrr::pmap_dfr(
   }
 )
 
+# Create a stable identifier and timestamp for this model run
+run_timestamp <- Sys.time()
+
+run_id <- format(
+  run_timestamp,
+  format = "%Y%m%dT%H%M%SZ",
+  tz = "UTC"
+)
+
+generated_at_utc <- format(
+  run_timestamp,
+  format = "%Y-%m-%dT%H:%M:%SZ",
+  tz = "UTC"
+)
+
+# Assemble the standardized AR output artifact
+ar_output_artifact <- list(
+  schema_version = "1.0",
+
+  metadata = list(
+    run_id = run_id,
+    model_name = "SVR-AR",
+    model_family = "statistical_time_series",
+    target = "log_svr",
+    selection_metric = "test_mae",
+    selection_direction = "minimize",
+    generated_at_utc = generated_at_utc,
+    data_start_date = as.character(min(df_all$date)),
+    latest_model_month = as.character(model_window$latest_model_month),
+    latest_model_month_end = as.character(model_window$latest_model_month_end),
+    training_window_type = "expanding",
+    test_start_date = as.character(min(test_df$date)),
+    test_end_date = as.character(max(test_df$date)),
+    observation_count = nrow(df_all),
+    test_observation_count = n_test
+  ),
+
+  metrics = metrics_ar_result,
+
+  selected_models = selected_ar_models,
+
+  predictions = selected_ar_predictions
+)
+
+# Create output directory for model artifacts
+artifact_dir <- "artifacts"
+
+dir.create(
+  artifact_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# Build timestamped artifact path
+artifact_path <- file.path(
+  artifact_dir,
+  paste0("ar_", run_id, ".json")
+)
+
+# Write standardized AR output artifact
+jsonlite::write_json(
+  ar_output_artifact,
+  path = artifact_path,
+  pretty = TRUE,
+  auto_unbox = TRUE,
+  dataframe = "rows",
+  na = "null",
+  null = "null",
+  digits = NA
+)
+
 # CSV Export
 write_csv(metrics_ar_result, "AR Metrics FINAL.csv")
 metrics_ar_result
