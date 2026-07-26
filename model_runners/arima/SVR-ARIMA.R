@@ -372,6 +372,8 @@ jsonlite::write_json(
   digits = NA
 )
 
-# CSV Export
-write_csv(metrics_arima_result, "ARIMA Metrics FINAL.csv")
-metrics_arima_result
+# Optional CSV validation export
+# write_csv(metrics_arima_result, "ARIMA Metrics - Model Runner.csv")
+
+# Optional console validation
+# metrics_arima_result
