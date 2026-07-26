@@ -146,7 +146,7 @@ summarize_pred_metrics <- function(pred_df) {
 # OUTER LOOP  : iterate p over p_grid
 # MIDDLE LOOP : iterate h over h_list
 # INNER LOOP  : roll over time k via roll_preds_arp_split()
-metrics_arp_nn <- purrr::map_dfr(p_grid, function(p0) {
+metrics_ar_result <- purrr::map_dfr(p_grid, function(p0) {
   purrr::map_dfr(h_list, function(h) {
     preds_test <- roll_preds_arp_split(df_all,
                                        test_df,
@@ -173,5 +173,5 @@ metrics_arp_nn <- purrr::map_dfr(p_grid, function(p0) {
   arrange(horizon, test_mae)
 
 # CSV Export
-write_csv(metrics_arp_nn, "AR Metrics FINAL.csv")
-metrics_arp_nn
+write_csv(metrics_ar_result, "AR Metrics FINAL.csv")
+metrics_ar_result
