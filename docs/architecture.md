@@ -1,5 +1,9 @@
 # SVR Dashboard System Design Notes
 
+## Diagram
+
+![SVRaaS architecture overview](images/svraas-architecture-overview.png)
+
 ## Purpose
 
 The goal is to build a rolling public dashboard for the SVR modeling project. The dashboard should visualize results from the AR, ARIMA, MLP, and LSTM models and update as new monthly data becomes available.
