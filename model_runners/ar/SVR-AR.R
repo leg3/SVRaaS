@@ -314,6 +314,8 @@ jsonlite::write_json(
   digits = NA
 )
 
-# CSV Export
-write_csv(metrics_ar_result, "AR Metrics FINAL.csv")
-metrics_ar_result
+# Optional CSV validation export
+# write_csv(metrics_ar_result, "AR Metrics - Model Runner.csv")
+
+# Optional console validation
+# metrics_ar_result
