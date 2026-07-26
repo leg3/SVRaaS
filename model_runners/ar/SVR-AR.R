@@ -213,6 +213,36 @@ selected_ar_models <- metrics_ar_result %>%
   ) %>%
   ungroup()
 
+# Retain AR specifications for the selected models
+selected_ar_specs <- selected_ar_models %>%
+  select(
+    model_id,
+    horizon,
+    p
+  )
+
+# Generate rolling predictions for the selected AR models
+selected_ar_predictions <- purrr::pmap_dfr(
+  selected_ar_specs,
+  function(model_id, horizon, p) {
+    roll_preds_arp_split(
+      df_all = df_all,
+      split_df = test_df,
+      split_start_idx = i_test_start,
+      h = horizon,
+      p = p
+    ) %>%
+      transmute(
+        date = as.character(date),
+        horizon = horizon,
+        model_id = model_id,
+        actual_log_svr = y,
+        predicted_log_svr = y_hat,
+        residual_log_svr = resid
+      )
+  }
+)
+
 # CSV Export
 write_csv(metrics_ar_result, "AR Metrics FINAL.csv")
 metrics_ar_result
