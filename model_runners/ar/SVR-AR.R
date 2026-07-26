@@ -77,11 +77,6 @@ h_list <- c(1, 3)
 # Define the AR order grid to evaluate
 p_grid <- c(1:6)
 
-# Define global start index for the test split inside df_all
-# Needed because rolling code maps split row k -> global df_all row index:
-# target_global_idx = split_start_idx + (k - 1)
-test_start_idx <- i_test_start
-
 # Define AR(p) fit function: For stationary AR(p), we set d = 0 and force
 # include.mean = TRUE.
 fit_arp <- function(ts_y, p) {
@@ -150,7 +145,7 @@ metrics_ar_result <- purrr::map_dfr(p_grid, function(p0) {
   purrr::map_dfr(h_list, function(h) {
     preds_test <- roll_preds_arp_split(df_all,
                                        test_df,
-                                       test_start_idx,
+                                       i_test_start,
                                        h = h,
                                        p = p0)
 
