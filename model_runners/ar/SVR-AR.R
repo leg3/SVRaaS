@@ -148,20 +148,15 @@ metrics_ar_result <- purrr::map_dfr(p_grid, function(p0) {
                                        h = h,
                                        p = p0)
 
-    m_test <- summarize_pred_metrics(preds_test)
-
-    tibble(
-      model_id = paste0("AR", p0),
-      p = p0,
-      horizon = h
-    ) %>% bind_cols(
-      m_test %>%
-        rename(
-          test_mse  = mse,
-          test_rmse = rmse,
-          test_mae  = mae
-        )
-    )
+    summarize_pred_metrics(preds_test) %>%
+      transmute(
+        model_id = paste0("AR", p0),
+        p = p0,
+        horizon = h,
+        test_mse = mse,
+        test_rmse = rmse,
+        test_mae = mae
+      )
   })
 }) %>%
   arrange(horizon, test_mae)
