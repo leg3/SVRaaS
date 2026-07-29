@@ -10,15 +10,12 @@
 # =============================================================================
 
 
-# Resolve the api directory from this file's location so startup does not
-# depend on the R process's current working directory.
-api_file <- normalizePath(
-  sys.frame(1)$ofile,
+# Use the api directory as the service startup working directory.
+api_dir <- normalizePath(
+  getwd(),
   winslash = "/",
   mustWork = TRUE
 )
-
-api_dir <- dirname(api_file)
 
 
 # Load the API configuration helpers using the resolved api directory.
@@ -27,6 +24,31 @@ source(
   local = TRUE
 )
 
+# Load the API health-check helpers using the resolved api directory.
+source(
+  file.path(api_dir, "R", "health.R"),
+  local = TRUE
+)
 
 # Read and validate the runtime configuration once when the API starts.
 api_config <- load_config()
+
+#* Report API and artifact-storage health.
+#*
+#* @get /health
+#*
+#* @serializer unboxedJSON
+function(response) {
+
+  # Build the health response from the configured artifact root.
+  health_response <- build_health_response(
+    api_config$artifact_root
+  )
+
+  # Return Service Unavailable when artifact storage cannot be accessed.
+  if (!identical(health_response$status, "ok")) {
+    response$status <- 503L
+  }
+
+  health_response
+}
