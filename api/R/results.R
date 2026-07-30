@@ -315,3 +315,40 @@ select_latest_cohort_candidates <- function(candidates, model_month) {
   
   selected_candidates
 }
+
+# Build the newest complete internal result set from artifact storage.
+build_latest_result_set <- function(artifact_root) {
+  
+  candidates <- build_artifact_candidates(artifact_root)
+  
+  model_month <- find_latest_complete_model_month(
+    candidates
+  )
+  
+  selected_candidates <- select_latest_cohort_candidates(
+    candidates,
+    model_month
+  )
+  
+  # Return no result set unless every expected model was selected.
+  if (
+    length(selected_candidates) != length(expected_models) ||
+    !identical(
+      names(selected_candidates),
+      names(expected_models)
+    )
+  ) {
+    return(NULL)
+  }
+  
+  list(
+    latest_model_month = format(
+      model_month,
+      "%Y-%m-%d"
+    ),
+    artifacts = lapply(
+      selected_candidates,
+      function(candidate) candidate$artifact
+    )
+  )
+}
