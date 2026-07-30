@@ -206,3 +206,112 @@ build_artifact_candidates <- function(artifact_root) {
     candidates
   )
 }
+
+# Find the newest model month containing every expected model.
+find_latest_complete_model_month <- function(candidates) {
+  
+  if (length(candidates) == 0L) {
+    return(as.Date(NA_character_))
+  }
+  
+  candidate_months <- vapply(
+    candidates,
+    function(candidate) {
+      format(candidate$latest_model_month, "%Y-%m-%d")
+    },
+    character(1)
+  )
+  
+  candidate_models <- vapply(
+    candidates,
+    function(candidate) candidate$model_name,
+    character(1)
+  )
+  
+  models_by_month <- split(
+    candidate_models,
+    candidate_months
+  )
+  
+  complete_months <- names(
+    Filter(
+      function(model_names) {
+        all(
+          unname(expected_models) %in% unique(model_names)
+        )
+      },
+      models_by_month
+    )
+  )
+  
+  if (length(complete_months) == 0L) {
+    return(as.Date(NA_character_))
+  }
+  
+  max(as.Date(complete_months))
+}
+
+# Select the newest artifact for each model within a complete model month.
+select_latest_cohort_candidates <- function(candidates, model_month) {
+  
+  if (
+    length(candidates) == 0L ||
+    length(model_month) != 1L ||
+    is.na(model_month)
+  ) {
+    return(list())
+  }
+  
+  # Exclude every candidate outside the selected cohort month.
+  month_candidates <- Filter(
+    function(candidate) {
+      identical(candidate$latest_model_month, model_month)
+    },
+    candidates
+  )
+  
+  # Select the newest candidate for each expected model.
+  selected_candidates <- lapply(
+    unname(expected_models),
+    function(model_name) {
+      
+      model_candidates <- Filter(
+        function(candidate) {
+          identical(candidate$model_name, model_name)
+        },
+        month_candidates
+      )
+      
+      if (length(model_candidates) == 0L) {
+        return(NULL)
+      }
+      
+      generated_times <- vapply(
+        model_candidates,
+        function(candidate) {
+          as.numeric(candidate$generated_at_utc)
+        },
+        numeric(1)
+      )
+      
+      model_candidates[[which.max(generated_times)]]
+    }
+  )
+  
+  # Return no cohort if any expected model is unexpectedly absent.
+  if (
+    any(
+      vapply(
+        selected_candidates,
+        is.null,
+        logical(1)
+      )
+    )
+  ) {
+    return(list())
+  }
+  
+  names(selected_candidates) <- names(expected_models)
+  
+  selected_candidates
+}
