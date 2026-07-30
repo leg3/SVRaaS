@@ -52,3 +52,9 @@ function(response) {
 
   health_response
 }
+
+# Load the API latest-results helpers using the resolved api directory.
+source(
+  file.path(api_dir, "R", "results.R"),
+  local = TRUE
+)
