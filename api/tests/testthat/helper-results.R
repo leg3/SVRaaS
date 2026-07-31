@@ -25,3 +25,43 @@ make_valid_artifact_fixture <- function() {
     predictions = list()
   )
 }
+
+# Build a validated in-memory candidate for cohort-selection tests.
+make_artifact_candidate_fixture <- function(
+    model_key,
+    latest_model_month = "2026-06-01",
+    generated_at_utc = "2026-07-31T12:00:00Z"
+) {
+
+  generated_time <- as.POSIXct(
+    generated_at_utc,
+    format = "%Y-%m-%dT%H:%M:%SZ",
+    tz = "UTC"
+  )
+
+  run_id <- format(
+    generated_time,
+    "%Y%m%dT%H%M%SZ",
+    tz = "UTC"
+  )
+
+  model_name <- unname(expected_models[[model_key]])
+
+  artifact <- make_valid_artifact_fixture()
+  artifact$metadata$run_id <- run_id
+  artifact$metadata$model_name <- model_name
+  artifact$metadata$generated_at_utc <- generated_at_utc
+  artifact$metadata$latest_model_month <- latest_model_month
+
+  list(
+    artifact_file = file.path(
+      "artifacts",
+      paste0(model_key, "_", run_id, ".json")
+    ),
+    model_name = model_name,
+    run_id = run_id,
+    generated_at_utc = generated_time,
+    latest_model_month = as.Date(latest_model_month),
+    artifact = artifact
+  )
+}
