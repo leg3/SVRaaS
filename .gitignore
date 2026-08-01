@@ -1,4 +1,5 @@
 *.csv
 *.png
+!docs/images/*.png
 *.json
 .Rhistory
