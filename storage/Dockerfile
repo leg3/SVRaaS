@@ -12,5 +12,9 @@ RUN mkdir -p /export/artifacts /var/run/ganesha
 
 EXPOSE 2049/tcp
 
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
 CMD ["ganesha.nfsd", "-F", "-L", "STDERR", "-f", "/etc/ganesha/ganesha.conf"]
 
