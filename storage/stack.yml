@@ -1,0 +1,29 @@
+services:
+  storage:
+    image: ghcr.io/leg3/svraas-nfs@sha256:4194c6170393db33dbdc973fca21fb27613fc02a5e06117783ec394638818769
+
+    cap_add:
+      - DAC_READ_SEARCH
+
+    volumes:
+      - artifacts:/export/artifacts
+
+    ports:
+      - target: 2049
+        published: 2049
+        protocol: tcp
+        mode: ingress
+
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      update_config:
+        parallelism: 1
+        order: stop-first
+
+volumes:
+  artifacts:
+    driver: local
+
