@@ -3,6 +3,7 @@ FROM rocker/r-ver:4.6.1
 ENV VIRTUAL_ENV=/opt/svraas/venv \
     RETICULATE_PYTHON=/opt/svraas/venv/bin/python \
     KERAS_BACKEND=tensorflow \
+    SVRAAS_ARTIFACT_ROOT=/artifacts \
     PATH="/opt/svraas/venv/bin:${PATH}"
 
 WORKDIR /opt/svraas

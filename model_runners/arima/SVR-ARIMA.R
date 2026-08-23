@@ -346,7 +346,10 @@ arima_output_artifact <- list(
 )
 
 # Create output directory for model artifacts
-artifact_dir <- "artifacts"
+artifact_dir <- Sys.getenv(
+  "SVRAAS_ARTIFACT_ROOT",
+  unset = "artifacts"
+)
 
 dir.create(
   artifact_dir,
