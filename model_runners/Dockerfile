@@ -56,6 +56,8 @@ COPY arima/SVR-ARIMA.R /opt/svraas/model_runners/arima/SVR-ARIMA.R
 COPY mlp/SVR-MLP.R /opt/svraas/model_runners/mlp/SVR-MLP.R
 COPY lstm/SVR-LSTM.R /opt/svraas/model_runners/lstm/SVR-LSTM.R
 COPY --chmod=0755 run_all.sh /opt/svraas/model_runners/run_all.sh
+COPY --chmod=0755 run_forever.sh /opt/svraas/model_runners/run_forever.sh
 COPY --chmod=0755 entrypoint.sh /opt/svraas/entrypoint.sh
 
 ENTRYPOINT ["/opt/svraas/entrypoint.sh"]
+CMD ["/opt/svraas/model_runners/run_forever.sh"]
