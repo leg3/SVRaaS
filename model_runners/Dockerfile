@@ -55,3 +55,4 @@ COPY ar/SVR-AR.R /opt/svraas/model_runners/ar/SVR-AR.R
 COPY arima/SVR-ARIMA.R /opt/svraas/model_runners/arima/SVR-ARIMA.R
 COPY mlp/SVR-MLP.R /opt/svraas/model_runners/mlp/SVR-MLP.R
 COPY lstm/SVR-LSTM.R /opt/svraas/model_runners/lstm/SVR-LSTM.R
+COPY --chmod=0755 run_all.sh /opt/svraas/model_runners/run_all.sh
