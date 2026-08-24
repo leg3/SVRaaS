@@ -62,47 +62,92 @@ print(data["seriess"][0]["observation_end"])
 }
 
 get_latest_completed_month() {
-    local artifacts=()
-    local latest_artifact
     local latest_month
+    local status
 
-    shopt -s nullglob
-    artifacts=( "${ARTIFACT_ROOT}"/lstm_*.json )
-    shopt -u nullglob
-
-    if (( ${#artifacts[@]} == 0 )); then
-        return 1
-    fi
-
-    latest_artifact="$(
-        printf '%s\n' "${artifacts[@]}" |
-            sort |
-            tail -n 1
-    )"
-
-    if ! latest_month="$(
-        python3 -c '
+    latest_month="$(
+        python3 - "$ARTIFACT_ROOT" <<'PY'
 import json
+import os
+import re
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8") as artifact:
-    data = json.load(artifact)
+artifact_root = sys.argv[1]
+max_attempts = 3
 
-print(data["metadata"]["latest_model_month"])
-' "$latest_artifact"
-    )"; then
-        printf 'WARNING: Unable to read latest_model_month from %s\n' \
-            "$latest_artifact" >&2
-        return 1
-    fi
+for attempt in range(1, max_attempts + 1):
+    try:
+        entries = os.listdir(artifact_root)
 
-    if ! [[ "$latest_month" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-        printf 'WARNING: Invalid latest_model_month in %s\n' \
-            "$latest_artifact" >&2
-        return 1
-    fi
+        artifacts = sorted(
+            name
+            for name in entries
+            if name.startswith("lstm_") and name.endswith(".json")
+        )
 
-    printf '%s\n' "$latest_month"
+        if not artifacts:
+            sys.exit(2)
+
+        latest_artifact = os.path.join(
+            artifact_root,
+            artifacts[-1],
+        )
+
+        with open(
+            latest_artifact,
+            "r",
+            encoding="utf-8",
+        ) as artifact:
+            data = json.load(artifact)
+
+        latest_month = data["metadata"]["latest_model_month"]
+
+        if not isinstance(latest_month, str) or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}",
+            latest_month,
+        ):
+            raise ValueError(
+                f"invalid latest_model_month in {latest_artifact}"
+            )
+
+    except (
+        OSError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        print(
+            f"WARNING: Artifact read attempt "
+            f"{attempt}/{max_attempts} failed: {exc}",
+            file=sys.stderr,
+        )
+
+        if attempt == max_attempts:
+            sys.exit(3)
+
+        continue
+
+    print(latest_month)
+    sys.exit(0)
+
+sys.exit(3)
+PY
+    )"
+    status=$?
+
+    case "$status" in
+        0)
+            printf '%s\n' "$latest_month"
+            return 0
+            ;;
+        2)
+            return 2
+            ;;
+        *)
+            return 3
+            ;;
+    esac
 }
 
 run_models() {
@@ -130,29 +175,42 @@ while true; do
 
     if ! fred_month="$(get_fred_latest_month)"; then
         printf 'ERROR: Unable to determine latest UMCSENT month from FRED.\n' >&2
-    elif artifact_month="$(get_latest_completed_month)"; then
-        printf 'FRED latest month:      %s\n' "$fred_month"
-        printf 'Latest completed month: %s\n' "$artifact_month"
-
-        if [[ "$fred_month" > "$artifact_month" ]]; then
-            if ! run_models; then
-                sleep_interval="$RETRY_INTERVAL"
-                printf 'Model suite will be retried after %s seconds.\n' \
-                    "$sleep_interval" >&2
-            fi
-        elif [[ "$fred_month" == "$artifact_month" ]]; then
-            printf 'Model artifacts are current. No run required.\n'
-        else
-            printf 'WARNING: Artifact month is newer than FRED. No run will be started.\n' >&2
-        fi
     else
-        printf 'No completed LSTM artifact found.\n'
+        artifact_month="$(get_latest_completed_month)"
+        artifact_status=$?
 
-        if ! run_models; then
-            sleep_interval="$RETRY_INTERVAL"
-            printf 'Model suite will be retried after %s seconds.\n' \
-                "$sleep_interval" >&2
-        fi
+        case "$artifact_status" in
+            0)
+                printf 'FRED latest month:      %s\n' "$fred_month"
+                printf 'Latest completed month: %s\n' "$artifact_month"
+
+                if [[ "$fred_month" > "$artifact_month" ]]; then
+                    if ! run_models; then
+                        sleep_interval="$RETRY_INTERVAL"
+                        printf 'Model suite will be retried after %s seconds.\n' \
+                            "$sleep_interval" >&2
+                    fi
+                elif [[ "$fred_month" == "$artifact_month" ]]; then
+                    printf 'Model artifacts are current. No run required.\n'
+                else
+                    printf 'WARNING: Artifact month is newer than FRED. No run will be started.\n' >&2
+                fi
+                ;;
+
+            2)
+                printf 'No completed LSTM artifact found.\n'
+
+                if ! run_models; then
+                    sleep_interval="$RETRY_INTERVAL"
+                    printf 'Model suite will be retried after %s seconds.\n' \
+                        "$sleep_interval" >&2
+                fi
+                ;;
+
+            *)
+                printf 'ERROR: Artifact storage could not be read reliably after 3 attempts. No model run will be started.\n' >&2
+                ;;
+        esac
     fi
 
     printf 'Sleeping for %s seconds.\n' "$sleep_interval"
