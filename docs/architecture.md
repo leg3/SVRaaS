@@ -1,548 +1,694 @@
-# SVR Dashboard System Design Notes
-
-## Diagram
-
-![SVRaaS architecture overview](images/svraas-architecture-overview.png)
+# SVRaaS Architecture
 
 ## Purpose
 
-The goal is to build a rolling public dashboard for the SVR modeling project. The dashboard should visualize results from the AR, ARIMA, MLP, and LSTM models and update as new monthly data becomes available.
+SVRaaS is the deployment and service layer for the Sentiment–Volatility Ratio modeling project.
 
-The system should preserve a clean separation between:
+Its purpose is to turn the AR, ARIMA, MLP, and LSTM research workflows into a rolling model-generation system that can update as new monthly data becomes available and provide completed results to downstream services.
 
-- model computation
-- artifact publication
-- internal orchestration
-- public API serving
+The architecture maintains separation between:
+
+- model execution and refresh monitoring
+- shared artifact storage
+- internal read-only API serving
+- future public API/cache serving
 - public website visualization
 
-The public-facing website should not run model code. It should fetch already-generated dashboard artifacts and render them.
+The public-facing website must never execute model code. Model computation happens independently, completed results are written as JSON artifacts, and downstream services consume those completed artifacts.
 
 ---
 
-## High-Level Architecture
+## Current Architecture
+
+The currently implemented system consists of two deployed Docker Swarm services and one implemented API application that has not yet been containerized for Swarm deployment.
 
 ```text
-SVR model layer
-  ↓
-R compute container
-  ↓
-JSON artifacts
-  ↓
-internal Plumber control/API layer
-  ↓
-public API bridge/cache layer
-  ↓
-aurora-solaria dashboard page
+                 FRED
+                   ↓
+        persistent model runner
+                   ↓
+        AR → ARIMA → MLP → LSTM
+                   ↓
+            JSON artifacts
+                   ↓
+       NFS-Ganesha artifact store
+                   ↓
+      read-only Plumber2 API logic
 ```
 
-The intended flow is:
+The deployed portion currently ends at the shared NFS artifact store.
+
+The Plumber2 API application is implemented and tested in the repository, but its containerized Swarm deployment and read-only NFS mount are the next major implementation step.
+
+Future public-serving components will sit beyond that API boundary.
+
+---
+
+## Core Design Principles
+
+### 1. Keep model execution separate from API serving
+
+The model runner owns:
+
+- checking whether newer source data is available
+- deciding whether a model refresh is needed
+- executing the model suite
+- writing completed JSON artifacts
+
+The internal API owns:
+
+- reading completed artifacts
+- validating artifact contents
+- assembling a coherent four-model result set
+- returning JSON
+- reporting whether artifact storage is available
+
+The API must not:
+
+- fetch FRED data
+- execute models
+- decide whether source data is newer
+- orchestrate model execution
+- modify model artifacts
+
+This separation allows the modeling implementation and serving implementation to evolve independently as long as the artifact contract remains compatible.
+
+---
+
+### 2. Keep the model runner single-replica
+
+The model runner is deployed as a persistent Docker Swarm service with:
 
 ```text
-New monthly data becomes available
-  ↓
-R compute layer detects valid complete data
-  ↓
-models run against expanded historical data
-  ↓
-results are exported as JSON artifacts
-  ↓
-Plumber exposes manifest/artifact status internally
-  ↓
-public API checks hashes and refreshes its local cache
-  ↓
-website dashboard fetches JSON from public API
-  ↓
-browser renders visualizations
+replicas: 1
+permanent node-placement constraint: none
+```
+
+The runner is intentionally single-replica because the model suite performs an ordered write workflow against shared artifact storage.
+
+Running multiple runner replicas could allow concurrent suites to execute and write model artifacts at the same time.
+
+The runner therefore relies on Swarm for placement and restart behavior while preserving one active model workflow at a time.
+
+---
+
+### 3. Keep each model in a separate R process
+
+The four model workflows are packaged in one runner image, but they do not execute inside one shared R session.
+
+`run_all.sh` executes the models sequentially as separate `Rscript` processes:
+
+```text
+run_all.sh
+    ↓
+AR
+    ↓
+ARIMA
+    ↓
+MLP
+    ↓
+LSTM
+```
+
+This preserves process isolation between model families and reduces the risk of:
+
+- stale R objects
+- package state leaking between models
+- memory contamination
+- TensorFlow/Keras state carrying between neural-network models
+- model-to-model side effects
+
+If any model exits unsuccessfully, `run_all.sh` stops immediately and later models are not started.
+
+Because LSTM runs last, the presence of a successfully completed LSTM artifact is used as the completion marker for the model suite.
+
+---
+
+## Persistent Refresh Monitoring
+
+Refresh behavior is implemented inside the persistent model runner rather than in a separate orchestrator service.
+
+`run_forever.sh` owns the monitoring and refresh decision.
+
+The current decision flow is:
+
+```text
+persistent runner starts
+        ↓
+query FRED UMCSENT metadata
+        ↓
+determine newest available model month
+        ↓
+inspect latest completed LSTM artifact
+        ↓
+read metadata.latest_model_month
+        ↓
+compare artifact month with FRED month
+```
+
+The result of that comparison determines what happens next:
+
+```text
+artifact month is current
+        ↓
+do not run models
+        ↓
+sleep and check again
+
+newer FRED month exists
+        ↓
+run complete model suite
+
+no completed LSTM artifact exists
+        ↓
+run complete model suite
+
+artifact storage cannot be read reliably
+        ↓
+do not run models
+        ↓
+return to normal polling
+```
+
+Normal availability polling is controlled by:
+
+```text
+SVRAAS_CHECK_INTERVAL=60
+```
+
+The validated Swarm deployment therefore checks once every 60 seconds when no model suite is running.
+
+If the model suite itself fails, the runner uses:
+
+```text
+SVRAAS_RETRY_INTERVAL=3600
+```
+
+before attempting the model workflow again.
+
+Model execution is synchronous. While `run_all.sh` is running, the persistent runner is blocked waiting for it to finish.
+
+A single runner instance therefore does not continue polling or launch another model suite while the current suite is executing.
+
+---
+
+## Model Data Window
+
+The deployed model workflows are no longer limited to the original fixed capstone end date.
+
+The runners retrieve and prepare the historical data required for the current available model month rather than stopping at the original research-period boundary.
+
+The original model repositories remain the reproducible research baseline, while the SVRaaS copies adapt those workflows for rolling execution.
+
+Refresh monitoring and model data preparation remain separate concerns:
+
+- `run_forever.sh` determines whether the suite needs to run
+- the individual R workflows retrieve and prepare the data required for model execution
+
+---
+
+## Artifact Contract
+
+Model artifact output is controlled through:
+
+```text
+SVRAAS_ARTIFACT_ROOT
+```
+
+The deployed runner sets:
+
+```text
+SVRAAS_ARTIFACT_ROOT=/artifacts
+```
+
+The model scripts treat that location as an ordinary filesystem path.
+
+They do not contain NFS-specific logic and do not need to know that `/artifacts` is backed by shared network storage.
+
+For native/local execution, the model scripts retain a local `artifacts` fallback when `SVRAAS_ARTIFACT_ROOT` is not supplied.
+
+The model suite writes individual timestamped JSON artifacts such as:
+
+```text
+ar_<timestamp>.json
+arima_<timestamp>.json
+mlp_<timestamp>.json
+lstm_<timestamp>.json
+```
+
+Each completed artifact includes model metadata used by downstream logic.
+
+In particular, the persistent runner reads:
+
+```text
+metadata.latest_model_month
+```
+
+from the newest completed LSTM artifact when determining whether the model suite is current.
+
+The current architecture does not use a published manifest, hash-addressed bundle, `current/` directory, or `latest.json` publication layer.
+
+Those mechanisms may be considered later but are not part of the implemented artifact contract.
+
+---
+
+## Shared NFS Artifact Storage
+
+SVRaaS uses a dedicated NFS-Ganesha storage service deployed through Docker Swarm.
+
+The current storage service is:
+
+- single-replica
+- NFSv4.1
+- TCP
+- published on port `2049`
+- exposed through the Docker Swarm ingress/routing mesh
+- backed by a Docker local volume
+- deployed from an immutable GHCR image digest
+
+The NFS export is:
+
+```text
+/artifacts
+```
+
+Inside the storage container, the backing Docker volume is mounted at:
+
+```text
+/export/artifacts
+```
+
+The Ganesha/VFS container runs with the container accommodations required by the current implementation, including:
+
+```text
+CAP_DAC_READ_SEARCH
 ```
 
 ---
 
-## Core Design Decisions
+## Artifact Storage Is an Ephemeral Cache
 
-### 1. Keep R/modeling separate from the public API
+The shared artifact store is intentionally treated as a rebuildable cache rather than durable authoritative storage.
 
-The R layer should focus on data retrieval, model execution, validation, and artifact creation.
+Whenever the storage container starts, its startup logic clears:
 
-The public API should not contain model logic. It should not know how AR, ARIMA, MLP, or LSTM work. Its job is to serve already-generated JSON artifacts.
+```text
+/export/artifacts
+```
 
-This allows the model layer to change independently as long as it continues to output valid JSON artifacts matching the agreed contract.
+before the NFS service begins serving the export.
+
+This means that storage recreation or relocation intentionally produces an empty artifact store.
+
+The expected recovery path is:
+
+```text
+storage starts
+        ↓
+artifact cache is empty
+        ↓
+persistent runner checks storage
+        ↓
+no completed LSTM artifact exists
+        ↓
+runner executes full model suite
+        ↓
+fresh artifacts repopulate NFS
+```
+
+This behavior is intentional.
+
+The model runners already retrieve the historical data necessary to rebuild their current artifacts, so preserving stale model artifacts across storage recreation is not currently required.
 
 ---
 
-### 2. Use an R compute service pinned to one Swarm node
+## Storage Backing Volume vs. Runner NFS Client Volume
 
-The model computation should run in a single controlled service, likely pinned to one compute node.
+The storage service and runner service use two different Docker volume concepts.
+
+They should not be treated as the same volume.
+
+### Storage backing volume
+
+The storage stack defines a local Docker volume that provides filesystem storage inside the NFS-Ganesha container:
 
 ```text
-svr-compute
-  replicas: 1
-  placement: compute node
-  access: internal only
+Docker local volume
+        ↓
+/export/artifacts
+        ↓
+NFS-Ganesha
+        ↓
+NFS export /artifacts
 ```
 
-This avoids multiple replicas trying to run expensive model jobs at the same time.
+This volume contains the actual server-side artifact files.
 
-The compute layer is not designed for public traffic. It is a controlled internal service.
+### Runner NFS client volume
+
+The runner stack separately defines an NFS client mount using Docker's local volume driver.
+
+Conceptually:
+
+```yaml
+volumes:
+  artifacts:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=127.0.0.1,nfsvers=4.1,rw
+      device: :/artifacts
+```
+
+That stack-scoped volume is an NFS client configuration, not the NFS server's backing volume.
+
+Docker creates the runner's NFS client volume from the stack definition when the service is scheduled onto a Swarm node that does not already have that stack-scoped volume.
+
+Manual creation of an NFS client volume on every Swarm node is therefore not required.
+
+This behavior was explicitly validated on previously unprepared Swarm nodes.
 
 ---
 
-### 3. Use an orchestrator script instead of one giant model script
+## NFS Read Safety
 
-The R side should not be one massive script that sources everything into the same R session.
-
-Instead, use an orchestrator pattern:
+During Swarm validation, one node reproduced a first-access NFS behavior where an artifact-directory access could fail with:
 
 ```text
-refresh_orchestrator.R
-  ├── fetch/validate data
-  ├── determine whether a run is needed
-  ├── run AR model
-  ├── run ARIMA model
-  ├── run MLP model
-  ├── run LSTM model
-  ├── collect outputs
-  ├── validate artifacts
-  └── publish final JSON bundle
+OSError: [Errno 121] Remote I/O error: '/artifacts'
 ```
 
-Each model runner should be separate:
+An immediate second access succeeded.
 
-```text
-run_ar.R
-run_arima.R
-run_mlp.R
-run_lstm.R
-```
+Testing showed that the behavior was attempt-specific rather than delay-specific, and it was reproduced through more than one client access method.
 
-The orchestrator owns the workflow. The model scripts should focus only on their own model.
+The underlying cause has not been established.
 
----
-
-### 4. Run each model in a clean R process
-
-Because the current workflow often involved restarting RStudio between models, the production workflow should avoid running all models in one polluted R session.
-
-The orchestrator should launch each model runner in a separate clean R process.
+The runner therefore protects the complete artifact-read operation with up to three immediate attempts.
 
 Conceptually:
 
 ```text
-orchestrator
-  → clean R process: AR
-  → clean R process: ARIMA
-  → clean R process: MLP
-  → clean R process: LSTM
+attempt complete artifact read
+        ↓
+success
+        → continue normally
+
+failure
+        ↓
+retry immediately
+        ↓
+up to 3 total attempts
 ```
 
-This reduces memory contamination, stale variables, TensorFlow/Keras state issues, and model-to-model side effects.
+If all three attempts fail:
+
+- artifact storage is considered unavailable
+- the condition is not interpreted as an empty artifact store
+- the model suite does not start
+- the runner returns to its normal polling interval
+
+This distinction is important because an unreadable artifact store must not accidentally be interpreted as "no artifacts exist."
+
+Without that protection, a transient NFS failure could incorrectly trigger an expensive four-model regeneration.
+
+The observed first-access behavior remains an operational investigation item. No specific Docker Engine, kernel, operating system, or NFS-client version has been established as the cause.
 
 ---
 
-### 5. The orchestrator owns gating logic
+## FRED Credentials
 
-The trigger only asks the system to check whether a model refresh should happen.
+The FRED API key is not baked into the runner image.
 
-The orchestrator decides whether the refresh actually runs.
-
-The gating logic should check:
-
-- whether a new complete monthly observation is available
-- whether both UMCSI and VIX are available for the target month
-- whether the target month is newer than the last successful run
-- whether the aligned data has missing values
-- whether another model refresh is already running
-- whether the expanded data window is valid
-
-The orchestrator should skip cleanly if the data is not ready.
-
----
-
-### 6. Models should use a dynamic expanded data window
-
-The current fixed-window model scripts need to be updated so they do not stop at the original capstone end date.
-
-Instead of using a fixed end date, the model layer should build the dataset as:
+Production Docker Swarm deployment uses the external secret:
 
 ```text
-1990-01 through latest complete available month
+fred_key
 ```
 
-A shared data-building function should handle:
-
-- pulling UMCSI
-- pulling VIX
-- aggregating VIX to monthly level if needed
-- aligning both series by month
-- removing incomplete current-month data
-- validating missing values
-- computing SVR
-- computing log(SVR)
-
-All models should consume the same prepared dataset.
-
----
-
-### 7. Export JSON artifacts from the model layer
-
-The current model scripts export CSV files. For the dashboard system, the model layer should also export JSON artifacts.
-
-The model code can make these artifacts granular.
-
-Example artifact structure:
+The runner entrypoint resolves the credential in this order:
 
 ```text
-artifacts/current/
-  manifest.json
-  latest.json
-  overview.json
-  metrics.json
-  forecasts.json
-  series.json
-  breaks.json
-  predictions/
-    ar_h1.json
-    ar_h3.json
-    arima_h1.json
-    arima_h3.json
-    mlp_h1.json
-    mlp_h3.json
-    lstm_h1.json
-    lstm_h3.json
+1. /run/secrets/fred_key
+2. FRED_KEY environment variable for local development
+3. fail startup if neither exists
 ```
 
-CSV can still exist for research/archive purposes, but the public dashboard should consume JSON.
+If `/run/secrets/fred_key` exists but is empty or unreadable, startup fails.
+
+The runner does not silently fall back to the environment variable when a Docker secret file exists but is invalid.
+
+The Swarm-secret path has been validated on nodes without the local development `.env` file.
 
 ---
 
-### 8. Use Plumber internally, not as the public API
+## TensorFlow Runtime on Non-AVX Hardware
 
-Plumber is an R package that exposes R functions as HTTP endpoints.
+Some target SVRaaS Swarm hardware does not support AVX CPU instructions.
 
-In this design, Plumber belongs inside the internal `svr-compute` service.
+Official TensorFlow wheels produced `SIGILL` when executed on that hardware.
 
-It should expose internal endpoints such as:
+The SVRaaS runner therefore consumes the separately published custom TensorFlow build from:
 
 ```text
-GET  /health
-GET  /status
-GET  /manifest
-GET  /artifacts/current
-POST /refresh
+https://github.com/leg3/tensorflow-nonavx
 ```
 
-Plumber should not be the public dashboard API. It should be an internal control/status layer for the compute service.
+The runner image pins the custom wheel by release URL and SHA256 and verifies the checksum during image construction.
+
+The resulting TensorFlow runtime has been validated on the target non-AVX Xeon hardware.
+
+Both the MLP and LSTM workflows successfully execute with this runtime.
+
+This is a current deployment requirement for the supported non-AVX hardware, not a hypothetical compatibility concern.
+
+The runner Dockerfile remains the source of truth for the exact TensorFlow wheel release and checksum.
 
 ---
 
-### 9. Public API acts as a bridge/cache layer
+## Docker Swarm Deployment
 
-The public API should sit between the browser and the internal compute service.
+### Storage service
 
-It should:
-
-- expose only public read-only endpoints
-- maintain its own local cache of JSON artifacts
-- check the internal manifest/hash before pulling new artifacts
-- avoid requesting the full bundle if nothing changed
-- serve cached JSON to public users
-- run as replicated stateless-ish services in Docker Swarm
-
-Request flow:
+The current storage deployment uses:
 
 ```text
-Public request hits svr-api
-  ↓
-svr-api checks local cached manifest
-  ↓
-svr-api checks internal manifest/hash
-  ↓
-if hash matches:
-      serve local cached JSON
-  ↓
-if hash differs:
-      pull new artifact bundle
-      validate hash
-      atomically update local cache
-      serve updated JSON
+replicas: 1
+protocol: NFSv4.1 over TCP
+published port: 2049
+publish mode: Swarm ingress
+artifact export: /artifacts
+backing path: /export/artifacts
+image reference: immutable GHCR digest
 ```
 
-Each `svr-api` replica can maintain its own local cache.
+The storage service is intentionally single-replica.
 
----
+### Model runner service
 
-### 10. Use hash/version checks for artifact updates
-
-The internal compute service should publish a manifest containing artifact version information.
-
-Example:
-
-```json
-{
-  "data_version": "2026-07",
-  "generated_at": "2026-07-02T18:00:00-04:00",
-  "artifact_hash": "sha256:abc123",
-  "latest_observation_month": "2026-06",
-  "bundle": "current.tar.gz"
-}
-```
-
-The public API checks this manifest before pulling artifacts.
-
-If the hash matches the local cache, no full artifact request is needed.
-
-If the hash differs, the public API pulls the new artifact bundle.
-
----
-
-## Component Responsibilities
-
-### `svr-compute`
-
-Internal R compute service.
-
-Responsibilities:
-
-- fetch latest data
-- validate monthly data completeness
-- run orchestrator
-- run model scripts
-- export JSON artifacts
-- publish manifest/hash
-- expose internal Plumber endpoints
-
-Should be:
+The current runner deployment uses:
 
 ```text
-internal only
-single replica
-pinned to compute node
-not public-facing
+replicas: 1
+placement constraint: none
+update order: stop-first
+artifact mount: shared NFS
+artifact root: /artifacts
+FRED credential: external fred_key secret
+normal check interval: 60 seconds
+model failure retry: 3600 seconds
+image reference: immutable GHCR digest
 ```
 
----
+`stop-first` update behavior prevents the old and replacement runner tasks from overlapping during a service update.
 
-### `refresh_orchestrator.R`
-
-Main R workflow controller.
-
-Responsibilities:
-
-- check whether a refresh is needed
-- enforce gating logic
-- prevent duplicate runs
-- launch model runners in clean R processes
-- collect model outputs
-- validate artifacts
-- write final JSON bundle
-- update manifest and run state
+The lack of a permanent placement constraint allows Swarm to schedule the runner onto an available node while the single-replica design prevents concurrent model-write workflows.
 
 ---
 
-### Model runner scripts
+## Internal Plumber2 API
 
-Separate scripts:
+The repository contains an implemented read-only Plumber2 API application.
+
+The current application exposes:
 
 ```text
-run_ar.R
-run_arima.R
-run_mlp.R
-run_lstm.R
+GET /health
+GET /v1/results/latest
 ```
 
-Responsibilities:
+The API reads completed model artifacts and identifies a coherent four-model result set.
 
-- consume prepared dynamic SVR dataset
-- run one model family
-- export model-specific JSON artifacts
-- avoid deciding whether a full system refresh should happen
+Its responsibility boundary is intentionally narrow.
 
----
+The API may:
 
-### Internal Plumber layer
+- inspect artifact storage
+- read completed artifacts
+- validate artifact contents
+- assemble a coherent AR/ARIMA/MLP/LSTM result set
+- return JSON
+- report whether artifact storage is available
 
-Internal control/status API.
+The API must not:
 
-Responsibilities:
+- fetch FRED data
+- execute models
+- determine whether source data is newer
+- trigger model execution
+- modify model artifacts
 
-- expose health/status
-- expose current manifest
-- expose artifact bundle
-- optionally trigger refresh
-- provide internal service interface for Jenkins or the public API bridge
-
-Not responsible for:
-
-- serving public users directly
-- running models on every dashboard request
-- acting as the public website API
-
----
-
-### Public `svr-api`
-
-Public read-only API/cache bridge.
-
-Responsibilities:
-
-- expose public endpoints under the website domain
-- serve cached JSON artifacts
-- rate-limit public traffic
-- check internal manifest/hash
-- pull updated artifact bundles only when needed
-- avoid model computation
-- avoid direct dependency on R model code
-
-Example public routes:
+The API requires an absolute artifact-root path when configured through:
 
 ```text
-/api/svr/v1/manifest
-/api/svr/v1/latest
-/api/svr/v1/overview
-/api/svr/v1/series
-/api/svr/v1/metrics
-/api/svr/v1/forecasts
-/api/svr/v1/breaks
-/api/svr/v1/predictions/ar/h1
-/api/svr/v1/predictions/mlp/h3
+SVRAAS_ARTIFACT_ROOT
 ```
 
----
+The application code and tests are implemented.
 
-### `aurora-solaria`
-
-Public website and dashboard frontend.
-
-Responsibilities:
-
-- host the crawlable SVR dashboard/research page
-- render charts and tables
-- fetch current JSON artifacts from the public API
-- provide public explanation of the models and methodology
-- avoid running model computation
-
-The website should own the public presentation layer.
+The API has not yet been packaged and deployed as its own Docker Swarm service.
 
 ---
 
-## Testing Plan
+## Next API Deployment Step
 
-Before building the public API, test the internal compute service directly.
+The next major implementation step is to containerize the existing Plumber2 API and connect it to the shared NFS artifact store.
 
-Initial test target:
+The deployed API should mount the artifact store read-only.
+
+Conceptually:
 
 ```text
-svr-compute
-  R + Plumber
-  mock orchestrator
-  mock artifacts
+NFS-Ganesha artifact store
+        ↓
+read-only NFS client mount
+        ↓
+stateless Plumber2 API service
 ```
 
-Test with Postman:
+Unlike the model runner, the API is expected to be stateless and capable of running multiple replicas against the same completed artifact set.
+
+API scaling must not introduce model execution or artifact-writing responsibilities.
+
+---
+
+## Validated Cold-Start Behavior
+
+The storage and persistent-runner architecture has passed a clean cold-start validation.
+
+The validation removed:
+
+- the runner stack
+- the storage stack
+- existing SVRaaS runner/client volumes from Swarm nodes
+- old storage backing volumes from Swarm nodes
+
+Storage was then redeployed from a clean state.
+
+The resulting workflow was:
 
 ```text
-GET  /health
-GET  /status
-GET  /manifest
-GET  /artifacts/current
-POST /refresh
+new storage service starts
+        ↓
+/export/artifacts is empty
+        ↓
+runner is deployed without a placement constraint
+        ↓
+runner finds no completed LSTM artifact
+        ↓
+AR runs
+        ↓
+ARIMA runs
+        ↓
+MLP runs
+        ↓
+LSTM runs
+        ↓
+four fresh JSON artifacts exist in NFS
+        ↓
+runner returns to 60-second monitoring
+        ↓
+next FRED/artifact comparison matches
+        ↓
+no unnecessary second model suite is launched
 ```
 
-First milestone:
+The validated cold-start suite produced one fresh artifact for each model family.
 
-- Plumber runs inside the container
-- Postman can hit endpoints
-- `/refresh` can trigger a mock orchestrator
-- mock artifacts are written
-- `/manifest` returns a valid hash/version
-- artifact endpoints return valid JSON
-
-Only after this is working should the public API bridge be built.
+This confirms the intended recovery property of the architecture: an empty artifact cache is sufficient to cause the persistent runner to regenerate the current model result set automatically.
 
 ---
 
-## First Implementation Priorities
+## Future Architecture and Operational Polish
 
-### Step 1: Dynamic data window
+The following items are not part of the current implemented architecture.
 
-Update the model-side data retrieval/preparation so the SVR dataset expands through the latest complete available month.
+They remain future work or possible improvements:
 
-This is separate from trigger logic.
+- containerized Plumber2 API deployment against read-only NFS
+- a unified SVRaaS Swarm stack containing storage, runner, and API
+- a cold-reset wrapper for repeatable removal of SVRaaS stacks and node-local volumes
+- clearer naming between storage backing volumes and NFS client volumes
+- explicit `SIGTERM` and `SIGINT` handling in `run_forever.sh`
+- stronger dependency and image-version pinning
+- semantic runner image releases
+- further investigation of the first-access NFS behavior
+- a public API/cache bridge
+- manifest/hash-based publication if it becomes useful
+- integration with the `aurora-solaria` dashboard frontend
 
-Goal:
-
-```text
-1990-01 through latest complete available month
-```
-
----
-
-### Step 2: Orchestrator skeleton
-
-Create a mock orchestrator that:
-
-- checks fake/latest data availability
-- checks run state
-- runs placeholder model scripts
-- writes mock JSON artifacts
-- writes manifest/hash
+Future components must not be described as current behavior until they have been implemented and validated.
 
 ---
 
-### Step 3: Internal Plumber service
+## Public API / Cache Layer
 
-Create the `svr-compute` container with Plumber endpoints for:
+A public API or cache bridge may eventually sit between the internal API and the public website.
 
-```text
-/health
-/status
-/manifest
-/refresh
-/artifacts/current
-```
+Potential responsibilities include:
 
-Test with Postman before exposing anything publicly.
+- exposing public read-only endpoints
+- insulating the internal API from public traffic
+- applying public rate limits
+- caching completed model results
+- allowing public-serving replicas to scale independently of the R API
 
----
+A manifest, content hash, versioned bundle, or similar publication mechanism may also be introduced later if it provides a useful cache-invalidation contract.
 
-### Step 4: Real model runners
-
-Adapt each model into a runner script:
-
-```text
-run_ar.R
-run_arima.R
-run_mlp.R
-run_lstm.R
-```
-
-Each runner should consume the shared dynamic dataset and export JSON artifacts.
+None of those mechanisms are currently implemented.
 
 ---
 
-### Step 5: Public API bridge/cache
+## `aurora-solaria`
 
-Build the public API only after the internal compute service and artifacts are stable.
+The `aurora-solaria` website remains the intended public presentation layer.
 
-The public API should:
+Its eventual SVR responsibilities may include:
 
-- check internal manifest/hash
-- maintain local cache
-- pull artifacts only when the hash changes
-- serve cached JSON publicly
-- apply rate limiting
+- hosting the public dashboard and research page
+- rendering charts and tables
+- fetching completed model results through a public-serving API
+- presenting model and methodology information
+- avoiding direct model execution
+
+Dashboard integration is future work.
 
 ---
 
 ## Main Design Principle
 
-The system should remain layered:
+The implemented and planned layers should remain separated:
 
 ```text
-R/modeling layer creates truth.
-Internal Plumber layer exposes status and artifacts.
-Public API caches and serves truth.
-aurora-solaria visualizes truth.
+Persistent runner computes model results.
+        ↓
+Shared artifact storage holds completed results.
+        ↓
+Internal API reads and serves completed results.
+        ↓
+Future public layers distribute those results.
+        ↓
+aurora-solaria visualizes them.
 ```
 
-The public dashboard should never cause model computation directly.
+The public dashboard must never cause model computation directly.
