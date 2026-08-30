@@ -1,5 +1,9 @@
 # SVRaaS Architecture
 
+## Diagram
+
+![SVRaaS architecture overview](images/svraas-architecture-overview.png)
+
 ## Purpose
 
 SVRaaS is the deployment and service layer for the Sentiment–Volatility Ratio modeling project.
