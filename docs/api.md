@@ -1,9 +1,9 @@
 # SVRaaS Internal API V1
 
-> **Status:** Implemented and tested as of August 1, 2026
+> **Status:** API application implemented and tested; containerized Swarm deployment pending
 > **Scope:** Internal, read-only API for completed SVRaaS model artifacts
 
-This document records the implemented API V1 behavior. The broader system architecture remains in `docs/architecture.md`; any reconciliation between the two documents can be handled separately.
+This document records the implemented API V1 behavior. The broader current system architecture is documented in `docs/architecture.md`.
 
 ## Purpose
 
@@ -51,7 +51,9 @@ The API must not:
 - Expose arbitrary filesystem paths.
 - Provide public authentication or rate limiting.
 
-Those responsibilities belong to the future orchestrator, artifact-publication process, public API/cache bridge, and deployment infrastructure.
+Source-data monitoring, refresh decisions, model execution, and artifact writing belong to the persistent model runner.
+
+Public authentication, rate limiting, cache behavior, and other public-serving concerns belong to future public deployment layers.
 
 ## Internal dependency flow
 
@@ -125,6 +127,8 @@ SVRAAS_ARTIFACT_ROOT
 
 The artifact root must not be hard-coded in repository functions.
 
+The configured artifact root must be an absolute path.
+
 The environment variable is:
 
 - Read once during API startup.
@@ -168,25 +172,42 @@ $env:SVRAAS_ARTIFACT_ROOT = "C:\path\to\svraas\artifacts"
 
 ### Container example
 
-A future container can use:
+The intended deployed API configuration is:
 
 ```text
-SVRAAS_ARTIFACT_ROOT=/data/artifacts
+SVRAAS_ARTIFACT_ROOT=/artifacts
 ```
 
-The production artifact directory should ultimately be mounted read-only.
+The API should receive `/artifacts` through a read-only mount of the shared artifact store.
+
+The model runner uses the shared artifact store read/write, while the API should use it read-only.
+
+The API treats `/artifacts` as an ordinary filesystem path and does not need NFS-specific logic.
 
 ### Supported storage arrangements
 
 The configuration boundary allows the API to target:
 
-- A local development directory.
-- A repository-relative artifact directory.
-- A Docker-mounted volume.
-- A production compute-node directory.
-- A future orchestrator-published directory.
+- An absolute local development directory.
+- An absolute Docker-mounted filesystem path.
+- An absolute shared-storage mount path such as `/artifacts`.
 
 No R source-code change should be required when the storage location changes.
+
+## Deployment status
+
+The Plumber2 API application and its automated tests are implemented.
+
+The API has not yet been packaged and deployed as its own Docker Swarm service.
+
+The intended deployment will:
+
+- mount the shared NFS artifact store read-only
+- configure an absolute `SVRAAS_ARTIFACT_ROOT`, expected to be `/artifacts`
+- remain stateless
+- support multiple API replicas against the same completed artifact set
+
+Unlike the single-replica model runner, the API is expected to be horizontally scalable because it does not execute models or modify artifacts.
 
 ## Artifact expectations
 
@@ -247,7 +268,9 @@ All four returned artifacts must share the same:
 metadata.latest_model_month
 ```
 
-The runners execute independently, so their `run_id` and `generated_at_utc` values do not need to match. The model month—not the cross-model run ID—is the cohort-alignment key.
+The models execute sequentially as separate `Rscript` processes, and each model produces its own artifact. Their `run_id` and `generated_at_utc` values therefore do not need to match.
+
+The model month—not the cross-model run ID—is the cohort-alignment key.
 
 The service must not independently take the newest file from each model and combine those files when their model months differ.
 
@@ -635,9 +658,9 @@ A later public bridge or gateway can provide:
 - Authentication if required.
 - TLS termination.
 - Public request controls.
-- Isolation from the compute node.
+- Isolation from the internal API.
 
-The artifact storage should be mounted read-only wherever practical.
+The deployed API should mount the shared artifact store read-only.
 
 Filesystem paths are internal implementation details and must never appear in HTTP responses.
 
@@ -646,6 +669,7 @@ Filesystem paths are internal implementation details and must never appear in HT
 Future changes should preserve these rules unless the API contract is deliberately revised:
 
 - The artifact root remains configurable.
+- The artifact root is an absolute path.
 - Configuration is resolved at startup.
 - The repository receives its root through dependency injection.
 - Repository methods do not depend on the current working directory.
@@ -683,12 +707,6 @@ The following items are intentionally outside API V1:
 - Manifest or hash validation.
 - Dashboard-specific response transformations.
 
-The future orchestrator should:
+Model execution, FRED release detection, monthly refresh decisions, and artifact writing are intentionally outside the API because those responsibilities are owned by the persistent model runner.
 
-1. Detect complete monthly source data.
-2. Run the four model runners.
-3. Publish artifacts to the configured storage location.
-4. Avoid exposing partially written files, preferably through atomic publication.
-5. Eventually publish a manifest or equivalent cohort record.
-
-The artifact repository was deliberately kept behind an interface so a future orchestrator manifest can replace directory-based discovery without requiring the public endpoint contract to change.
+The artifact repository remains behind an interface so directory-based discovery can later be replaced by a manifest or another cohort-discovery mechanism without requiring the HTTP endpoint contract to change.
