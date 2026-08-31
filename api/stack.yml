@@ -1,0 +1,37 @@
+services:
+  api:
+    image: ghcr.io/leg3/svraas-api@sha256:2e9449d259f11c4917f220cf74e1a99fade3d7883e0247fb02d518f766bd6985
+
+    environment:
+      SVRAAS_ARTIFACT_ROOT: /artifacts
+
+    volumes:
+      - artifacts:/artifacts:ro
+
+    deploy:
+      replicas: 3
+
+      placement:
+        max_replicas_per_node: 1
+
+      restart_policy:
+        condition: any
+        delay: 5s
+
+      update_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: rollback
+
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+
+volumes:
+  artifacts:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=127.0.0.1,nfsvers=4.1,ro
+      device: :/artifacts
+
