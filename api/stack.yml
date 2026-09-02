@@ -5,6 +5,12 @@ services:
     environment:
       SVRAAS_ARTIFACT_ROOT: /artifacts
 
+    ports:
+      - target: 8000
+        published: 8000
+        protocol: tcp
+        mode: ingress
+
     volumes:
       - artifacts:/artifacts:ro
 
@@ -34,4 +40,3 @@ volumes:
       type: nfs
       o: addr=127.0.0.1,nfsvers=4.1,ro
       device: :/artifacts
-
