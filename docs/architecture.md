@@ -1,50 +1,68 @@
 # SVRaaS Architecture
 
-## Diagram
-
-![SVRaaS architecture overview](images/svraas-architecture-overview.png)
-
 ## Purpose
 
 SVRaaS is the deployment and service layer for the Sentiment–Volatility Ratio modeling project.
 
-Its purpose is to turn the AR, ARIMA, MLP, and LSTM research workflows into a rolling model-generation system that can update as new monthly data becomes available and provide completed results to downstream services.
+Its purpose is to turn the AR, ARIMA, MLP, and LSTM research workflows into a rolling model-generation and serving system that can update as new monthly data becomes available and provide completed results to downstream consumers.
 
-The architecture maintains separation between:
+The architecture separates:
 
 - model execution and refresh monitoring
 - shared artifact storage
 - internal read-only API serving
-- future public API/cache serving
-- public website visualization
+- website presentation
 
-The public-facing website must never execute model code. Model computation happens independently, completed results are written as JSON artifacts, and downstream services consume those completed artifacts.
+The website must never execute model code directly.
+
+Model computation happens independently, completed results are written as JSON artifacts, and the internal API reads and serves coherent completed model results.
 
 ---
 
 ## Current Architecture
 
-The currently implemented system consists of two deployed Docker Swarm services and one implemented API application that has not yet been containerized for Swarm deployment.
+SVRaaS currently consists of three Docker Swarm service layers:
 
 ```text
                  FRED
                    ↓
         persistent model runner
+             Swarm service
+             replicas: 1
                    ↓
         AR → ARIMA → MLP → LSTM
                    ↓
             JSON artifacts
                    ↓
        NFS-Ganesha artifact store
+             Swarm service
+             replicas: 1
                    ↓
-      read-only Plumber2 API logic
+            read-only NFS
+                   ↓
+         Plumber2 internal API
+             Swarm service
+             replicas: 3
+                   ↓
+       future website integration
 ```
 
-The deployed portion currently ends at the shared NFS artifact store.
+The three implemented service responsibilities are intentionally distinct:
 
-The Plumber2 API application is implemented and tested in the repository, but its containerized Swarm deployment and read-only NFS mount are the next major implementation step.
+```text
+runner
+  computes and writes model results
 
-Future public-serving components will sit beyond that API boundary.
+storage
+  provides shared artifact storage
+
+API
+  reads, validates, and serves completed results
+```
+
+The website integration boundary has not yet been implemented.
+
+The current API is an internal service. Its container listens on port `8000`, but the current API Swarm stack does not publish that port externally.
 
 ---
 
@@ -128,6 +146,24 @@ Because LSTM runs last, the presence of a successfully completed LSTM artifact i
 
 ---
 
+### 4. Treat the API as a read-only consumer
+
+The API mounts the same shared artifact store used by the runner, but its mount is read-only.
+
+The API is designed only as a read-only consumer and has no model-publication or refresh responsibilities.
+
+This keeps the direction of data flow simple:
+
+```text
+runner
+  ↓ writes
+artifact storage
+  ↓ reads
+API
+```
+
+---
+
 ## Persistent Refresh Monitoring
 
 Refresh behavior is implemented inside the persistent model runner rather than in a separate orchestrator service.
@@ -180,7 +216,7 @@ Normal availability polling is controlled by:
 SVRAAS_CHECK_INTERVAL=60
 ```
 
-The validated Swarm deployment therefore checks once every 60 seconds when no model suite is running.
+The current Swarm deployment therefore checks once every 60 seconds when no model suite is running.
 
 If the model suite itself fails, the runner uses:
 
@@ -190,7 +226,9 @@ SVRAAS_RETRY_INTERVAL=3600
 
 before attempting the model workflow again.
 
-Model execution is synchronous. While `run_all.sh` is running, the persistent runner is blocked waiting for it to finish.
+Model execution is synchronous.
+
+While `run_all.sh` is running, the persistent runner is blocked waiting for it to finish.
 
 A single runner instance therefore does not continue polling or launch another model suite while the current suite is executing.
 
@@ -225,11 +263,17 @@ The deployed runner sets:
 SVRAAS_ARTIFACT_ROOT=/artifacts
 ```
 
-The model scripts treat that location as an ordinary filesystem path.
+The API also uses:
+
+```text
+SVRAAS_ARTIFACT_ROOT=/artifacts
+```
+
+The model and API code treat that location as an ordinary filesystem path.
 
 They do not contain NFS-specific logic and do not need to know that `/artifacts` is backed by shared network storage.
 
-For native/local execution, the model scripts retain a local `artifacts` fallback when `SVRAAS_ARTIFACT_ROOT` is not supplied.
+For native or local model execution, the model scripts retain a local `artifacts` fallback when `SVRAAS_ARTIFACT_ROOT` is not supplied.
 
 The model suite writes individual timestamped JSON artifacts such as:
 
@@ -250,9 +294,11 @@ metadata.latest_model_month
 
 from the newest completed LSTM artifact when determining whether the model suite is current.
 
+The API uses the model month to identify a coherent completed AR, ARIMA, MLP, and LSTM cohort.
+
 The current architecture does not use a published manifest, hash-addressed bundle, `current/` directory, or `latest.json` publication layer.
 
-Those mechanisms may be considered later but are not part of the implemented artifact contract.
+A different cohort-discovery mechanism could be introduced later if it provides a clear operational benefit, but it is not required by the current architecture.
 
 ---
 
@@ -266,7 +312,7 @@ The current storage service is:
 - NFSv4.1
 - TCP
 - published on port `2049`
-- exposed through the Docker Swarm ingress/routing mesh
+- exposed through the Docker Swarm ingress routing mesh
 - backed by a Docker local volume
 - deployed from an immutable GHCR image digest
 
@@ -282,7 +328,7 @@ Inside the storage container, the backing Docker volume is mounted at:
 /export/artifacts
 ```
 
-The Ganesha/VFS container runs with the container accommodations required by the current implementation, including:
+The Ganesha/VFS container runs with the container accommodation required by the current implementation:
 
 ```text
 CAP_DAC_READ_SEARCH
@@ -322,19 +368,19 @@ fresh artifacts repopulate NFS
 
 This behavior is intentional.
 
-The model runners already retrieve the historical data necessary to rebuild their current artifacts, so preserving stale model artifacts across storage recreation is not currently required.
+The model runners retrieve the historical data necessary to rebuild their current artifacts, so preserving stale model artifacts across storage recreation is not currently required.
 
 ---
 
-## Storage Backing Volume vs. Runner NFS Client Volume
+## Storage Backing Volume vs. NFS Client Volumes
 
-The storage service and runner service use two different Docker volume concepts.
+The storage service, runner service, and API service use different Docker volume concepts.
 
 They should not be treated as the same volume.
 
 ### Storage backing volume
 
-The storage stack defines a local Docker volume that provides filesystem storage inside the NFS-Ganesha container:
+The storage stack defines a Docker local volume that provides filesystem storage inside the NFS-Ganesha container:
 
 ```text
 Docker local volume
@@ -364,13 +410,31 @@ volumes:
       device: :/artifacts
 ```
 
-That stack-scoped volume is an NFS client configuration, not the NFS server's backing volume.
+The runner therefore receives read/write access to `/artifacts`.
 
-Docker creates the runner's NFS client volume from the stack definition when the service is scheduled onto a Swarm node that does not already have that stack-scoped volume.
+### API NFS client volume
 
-Manual creation of an NFS client volume on every Swarm node is therefore not required.
+The API stack independently defines its own NFS client mount:
 
-This behavior was explicitly validated on previously unprepared Swarm nodes.
+```yaml
+volumes:
+  artifacts:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=127.0.0.1,nfsvers=4.1,ro
+      device: :/artifacts
+```
+
+The API therefore receives read-only access to the same NFS export.
+
+These stack-scoped volumes are NFS client configurations, not the NFS server's backing volume.
+
+Docker creates the client volumes from the stack definitions when services are scheduled onto Swarm nodes that do not already have those stack-scoped volumes.
+
+Manual creation of the NFS client volume on every Swarm node is therefore not required.
+
+This behavior was explicitly validated during the runner deployment on previously unprepared Swarm nodes.
 
 ---
 
@@ -416,7 +480,9 @@ This distinction is important because an unreadable artifact store must not acci
 
 Without that protection, a transient NFS failure could incorrectly trigger an expensive four-model regeneration.
 
-The observed first-access behavior remains an operational investigation item. No specific Docker Engine, kernel, operating system, or NFS-client version has been established as the cause.
+The observed first-access behavior remains an operational investigation item.
+
+No specific Docker Engine, kernel, operating system, or NFS-client version has been established as the cause.
 
 ---
 
@@ -472,6 +538,10 @@ The runner Dockerfile remains the source of truth for the exact TensorFlow wheel
 
 ## Docker Swarm Deployment
 
+SVRaaS currently deploys storage, runner, and API as separate Swarm stacks.
+
+This keeps the three service responsibilities independently deployable while the architecture is still evolving.
+
 ### Storage service
 
 The current storage deployment uses:
@@ -483,6 +553,8 @@ published port: 2049
 publish mode: Swarm ingress
 artifact export: /artifacts
 backing path: /export/artifacts
+restart condition: on-failure
+update order: stop-first
 image reference: immutable GHCR digest
 ```
 
@@ -495,8 +567,10 @@ The current runner deployment uses:
 ```text
 replicas: 1
 placement constraint: none
+restart condition: any
+restart delay: 5 seconds
 update order: stop-first
-artifact mount: shared NFS
+artifact mount: shared NFS read/write
 artifact root: /artifacts
 FRED credential: external fred_key secret
 normal check interval: 60 seconds
@@ -508,11 +582,45 @@ image reference: immutable GHCR digest
 
 The lack of a permanent placement constraint allows Swarm to schedule the runner onto an available node while the single-replica design prevents concurrent model-write workflows.
 
+### Internal API service
+
+The current API deployment uses:
+
+```text
+replicas: 3
+max replicas per node: 1
+restart condition: any
+restart delay: 5 seconds
+update parallelism: 1
+update order: stop-first
+update failure action: rollback
+rollback parallelism: 1
+rollback order: stop-first
+artifact mount: shared NFS read-only
+artifact root: /artifacts
+NFS version: 4.1
+container port: 8000
+published Swarm port: none
+image reference: immutable GHCR digest
+```
+
+The API is stateless and read-only, allowing multiple replicas to serve the same completed artifact set.
+
+Limiting the service to one replica per node distributes the API tasks across available Swarm nodes.
+
+The API container includes its own health check against:
+
+```text
+GET /health
+```
+
+The health check runs against the local container listener on port `8000`.
+
 ---
 
 ## Internal Plumber2 API
 
-The repository contains an implemented read-only Plumber2 API application.
+The repository contains a containerized read-only Plumber2 API.
 
 The current application exposes:
 
@@ -548,31 +656,34 @@ The API requires an absolute artifact-root path when configured through:
 SVRAAS_ARTIFACT_ROOT
 ```
 
-The application code and tests are implemented.
-
-The API has not yet been packaged and deployed as its own Docker Swarm service.
-
----
-
-## Next API Deployment Step
-
-The next major implementation step is to containerize the existing Plumber2 API and connect it to the shared NFS artifact store.
-
-The deployed API should mount the artifact store read-only.
-
-Conceptually:
+The deployed service uses:
 
 ```text
-NFS-Ganesha artifact store
-        ↓
-read-only NFS client mount
-        ↓
-stateless Plumber2 API service
+SVRAAS_ARTIFACT_ROOT=/artifacts
 ```
 
-Unlike the model runner, the API is expected to be stateless and capable of running multiple replicas against the same completed artifact set.
+The API container is based on:
 
-API scaling must not introduce model execution or artifact-writing responsibilities.
+```text
+rocker/r-ver:4.6.1
+```
+
+Its runtime R dependencies include:
+
+```text
+plumber2
+jsonlite
+```
+
+The service binds Plumber2 to:
+
+```text
+0.0.0.0:8000
+```
+
+Port `8000` is exposed by the container image but is not currently published by the API Swarm stack.
+
+This preserves the API as an internal service until the website integration boundary is deliberately implemented.
 
 ---
 
@@ -623,65 +734,56 @@ This confirms the intended recovery property of the architecture: an empty artif
 
 ---
 
-## Future Architecture and Operational Polish
+## Website Integration
 
-The following items are not part of the current implemented architecture.
+The next system-level boundary is integration between the internal SVRaaS API and the website presentation layer.
 
-They remain future work or possible improvements:
-
-- containerized Plumber2 API deployment against read-only NFS
-- a unified SVRaaS Swarm stack containing storage, runner, and API
-- a cold-reset wrapper for repeatable removal of SVRaaS stacks and node-local volumes
-- clearer naming between storage backing volumes and NFS client volumes
-- explicit `SIGTERM` and `SIGINT` handling in `run_forever.sh`
-- stronger dependency and image-version pinning
-- semantic runner image releases
-- further investigation of the first-access NFS behavior
-- a public API/cache bridge
-- manifest/hash-based publication if it becomes useful
-- integration with the `aurora-solaria` dashboard frontend
-
-Future components must not be described as current behavior until they have been implemented and validated.
-
----
-
-## Public API / Cache Layer
-
-A public API or cache bridge may eventually sit between the internal API and the public website.
-
-Potential responsibilities include:
-
-- exposing public read-only endpoints
-- insulating the internal API from public traffic
-- applying public rate limits
-- caching completed model results
-- allowing public-serving replicas to scale independently of the R API
-
-A manifest, content hash, versioned bundle, or similar publication mechanism may also be introduced later if it provides a useful cache-invalidation contract.
-
-None of those mechanisms are currently implemented.
-
----
-
-## `aurora-solaria`
-
-The `aurora-solaria` website remains the intended public presentation layer.
+The `aurora-solaria` website remains the intended consumer of completed SVR results.
 
 Its eventual SVR responsibilities may include:
 
 - hosting the public dashboard and research page
 - rendering charts and tables
-- fetching completed model results through a public-serving API
+- consuming completed model results
 - presenting model and methodology information
 - avoiding direct model execution
 
-Dashboard integration is future work.
+The specific network and application boundary between `aurora-solaria` and the internal API has not yet been implemented.
+
+That integration should preserve the existing architecture rule:
+
+```text
+website
+  does not execute models
+  does not write artifacts
+  does not require direct access to artifact storage
+```
+
+The website should obtain completed results through the serving boundary rather than reaching directly into model execution or NFS storage.
+
+---
+
+## Future Operational Work
+
+The following remain possible future improvements:
+
+- a unified SVRaaS Swarm stack containing storage, runner, and API
+- a cold-reset wrapper for repeatable removal of SVRaaS stacks and node-local volumes
+- clearer naming between storage backing volumes and NFS client volumes
+- explicit `SIGTERM` and `SIGINT` handling in `run_forever.sh`
+- stronger dependency and image-version pinning where useful
+- semantic runner and API image releases
+- further investigation of the first-access NFS behavior
+- an explicit cohort manifest or other publication mechanism if operationally useful
+- integration with the `aurora-solaria` dashboard frontend
+
+Future components should not be described as current behavior until they have been implemented and validated.
 
 ---
 
 ## Main Design Principle
 
-The implemented and planned layers should remain separated:
+The architecture remains intentionally layered:
 
 ```text
 Persistent runner computes model results.
@@ -690,9 +792,7 @@ Shared artifact storage holds completed results.
         ↓
 Internal API reads and serves completed results.
         ↓
-Future public layers distribute those results.
-        ↓
-aurora-solaria visualizes them.
+Website presentation consumes those results.
 ```
 
-The public dashboard must never cause model computation directly.
+The website must never cause model computation directly.
