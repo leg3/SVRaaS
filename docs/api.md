@@ -1,6 +1,6 @@
 # SVRaaS Internal API V1
 
-> **Status:** API application implemented and tested; containerized Swarm deployment pending
+> **Status:** Implemented, tested, containerized, and deployed through Docker Swarm
 > **Scope:** Internal, read-only API for completed SVRaaS model artifacts
 
 This document records the implemented API V1 behavior. The broader current system architecture is documented in `docs/architecture.md`.
@@ -53,7 +53,7 @@ The API must not:
 
 Source-data monitoring, refresh decisions, model execution, and artifact writing belong to the persistent model runner.
 
-Public authentication, rate limiting, cache behavior, and other public-serving concerns belong to future public deployment layers.
+Website routing, TLS termination, authentication, rate limiting, and other presentation-layer concerns are outside API V1.
 
 ## Internal dependency flow
 
@@ -170,17 +170,17 @@ The variable can instead be set for the current PowerShell process before starti
 $env:SVRAAS_ARTIFACT_ROOT = "C:\path\to\svraas\artifacts"
 ```
 
-### Container example
+### Container deployment
 
-The intended deployed API configuration is:
+The deployed API configuration is:
 
 ```text
 SVRAAS_ARTIFACT_ROOT=/artifacts
 ```
 
-The API should receive `/artifacts` through a read-only mount of the shared artifact store.
+The API receives `/artifacts` through a read-only mount of the shared NFS artifact store.
 
-The model runner uses the shared artifact store read/write, while the API should use it read-only.
+The model runner uses the shared artifact store read/write, while the API uses it read-only.
 
 The API treats `/artifacts` as an ordinary filesystem path and does not need NFS-specific logic.
 
@@ -194,20 +194,26 @@ The configuration boundary allows the API to target:
 
 No R source-code change should be required when the storage location changes.
 
-## Deployment status
+## Docker Swarm deployment
 
-The Plumber2 API application and its automated tests are implemented.
+The Plumber2 API is packaged and deployed as its own Docker Swarm service.
 
-The API has not yet been packaged and deployed as its own Docker Swarm service.
+The current deployment uses:
 
-The intended deployment will:
+```text
+replicas: 3
+max replicas per node: 1
+artifact mount: shared NFS read-only
+artifact root: /artifacts
+NFS version: 4.1
+container port: 8000
+published Swarm port: none
+image reference: immutable GHCR digest
+```
 
-- mount the shared NFS artifact store read-only
-- configure an absolute `SVRAAS_ARTIFACT_ROOT`, expected to be `/artifacts`
-- remain stateless
-- support multiple API replicas against the same completed artifact set
+The API is stateless and read-only, allowing multiple replicas to serve the same completed artifact set.
 
-Unlike the single-replica model runner, the API is expected to be horizontally scalable because it does not execute models or modify artifacts.
+The current Swarm stack does not publish port `8000`, so the service remains internal while the website integration boundary is still being designed.
 
 ## Artifact expectations
 
@@ -251,7 +257,7 @@ Metadata used by the repository and result-set service includes:
 
 Malformed JSON, unsupported schema versions, incorrect model identities, missing required sections, and incomplete artifacts cannot participate in a returned cohort.
 
-Artifact filenames are an internal repository concern, not part of the public HTTP contract.
+Artifact filenames are an internal repository concern, not part of the HTTP contract.
 
 ## Complete-cohort rules
 
@@ -651,16 +657,11 @@ It currently provides no:
 
 It must not be exposed directly to the public internet in its present form.
 
-A later public bridge or gateway can provide:
+The current Swarm stack does not publish the API's container port externally.
 
-- Cached responses.
-- Rate limiting.
-- Authentication if required.
-- TLS termination.
-- Public request controls.
-- Isolation from the internal API.
+The deployed API mounts the shared artifact store read-only.
 
-The deployed API should mount the shared artifact store read-only.
+Website routing and any additional access controls belong at the eventual website integration boundary.
 
 Filesystem paths are internal implementation details and must never appear in HTTP responses.
 
@@ -696,7 +697,7 @@ The following items are intentionally outside API V1:
 - Standalone metrics endpoints.
 - Authentication.
 - Rate limiting.
-- Public deployment.
+- Website integration.
 - OpenAPI customization.
 - Additional status endpoints.
 - Administrative endpoints.
