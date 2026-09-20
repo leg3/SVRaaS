@@ -16,9 +16,28 @@ check_artifact_root <- function(artifact_root) {
   # Confirm that the configured path exists and represents a directory.
   root_exists <- dir.exists(artifact_root)
 
-  # Check read access only when the directory exists.
-  root_readable <- root_exists &&
+  # Confirm basic read access before attempting a real directory enumeration.
+  root_accessible <- root_exists &&
     file.access(artifact_root, mode = 4L) == 0L
+
+  # Force an actual directory read so stale or otherwise unusable NFS mounts
+  # are reported as unhealthy. An empty but readable directory is valid.
+  root_readable <- root_accessible &&
+    isTRUE(
+      tryCatch(
+        {
+          list.files(
+            artifact_root,
+            all.files = TRUE,
+            no.. = TRUE
+          )
+
+          TRUE
+        },
+        warning = function(warning) FALSE,
+        error = function(error) FALSE
+      )
+    )
 
   # Return the dependency status without exposing the filesystem path.
   list(

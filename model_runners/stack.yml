@@ -1,6 +1,6 @@
 services:
   runner:
-    image: ghcr.io/leg3/svraas-runner@sha256:27e2c1df6960041c8a2a943b66fe4033274fc6101e6d7fddd76c800cb93c6aa5
+    image: ghcr.io/leg3/svraas-runner@sha256:d95364e17ab6c46927129ddb8b46ab8718a00e8b700888a2b22cf3fff262d5a9
 
     environment:
       SVRAAS_ARTIFACT_ROOT: /artifacts
