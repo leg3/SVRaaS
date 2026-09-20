@@ -59,5 +59,8 @@ COPY --chmod=0755 run_all.sh /opt/svraas/model_runners/run_all.sh
 COPY --chmod=0755 run_forever.sh /opt/svraas/model_runners/run_forever.sh
 COPY --chmod=0755 entrypoint.sh /opt/svraas/entrypoint.sh
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python3", "-c", "import os; os.listdir('/artifacts')"]
+
 ENTRYPOINT ["/opt/svraas/entrypoint.sh"]
 CMD ["/opt/svraas/model_runners/run_forever.sh"]
