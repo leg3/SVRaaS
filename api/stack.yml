@@ -14,6 +14,10 @@ services:
     volumes:
       - artifacts:/artifacts:ro
 
+    networks:
+      - default
+      - api-php-bridge
+
     deploy:
       replicas: 3
 
@@ -40,3 +44,8 @@ volumes:
       type: nfs
       o: addr=127.0.0.1,nfsvers=4.1,ro
       device: :/artifacts
+
+networks:
+  default: {}
+  api-php-bridge:
+    external: true
