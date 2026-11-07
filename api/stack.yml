@@ -1,6 +1,6 @@
 services:
   api:
-    image: ghcr.io/leg3/svraas-api@sha256:495f1416d5f4a33e8ff6df45cf4182ca4efcc6bd1ed737e7738e4ca865973b77
+    image: ghcr.io/leg3/svraas-api@sha256:66babc2c7e28ba8cfbb71f0c43e65936e69329b54f2c9da4f4e9f66f4c906c72
 
     environment:
       SVRAAS_ARTIFACT_ROOT: /artifacts
