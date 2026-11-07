@@ -25,15 +25,16 @@ supported_schema_versions <- "1.0"
 list_artifact_files <- function(artifact_root) {
 
   # Return file paths in a stable order for predictable processing.
-  sort(
-    list.files(
-      path = artifact_root,
-      pattern = "\\.json$",
-      full.names = TRUE,
-      recursive = FALSE,
-      ignore.case = TRUE
-    )
+  files <- list.files(
+    path = artifact_root,
+    pattern = "\\.json$",
+    full.names = TRUE,
+    recursive = FALSE,
+    ignore.case = TRUE
   )
+
+  # Runner status is operational metadata, not a model artifact.
+  sort(files[tolower(basename(files)) != "status.json"])
 }
 
 # Read an artifact without allowing malformed JSON to stop cohort discovery.

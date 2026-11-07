@@ -20,9 +20,11 @@ testthat::test_that("artifact files are discovered predictably", {
     file.path(artifact_root, "alpha.JSON")
   )
 
-  # Create two top-level JSON candidates and two files that must be ignored.
+  # Operational status is not a model artifact, even with unusual casing.
   file.create(
     top_level_json,
+    file.path(artifact_root, "status.json"),
+    file.path(artifact_root, "STATUS.JSON"),
     file.path(artifact_root, "notes.txt"),
     file.path(artifact_root, "nested", "ignored.json")
   )

@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ARTIFACT_ROOT="${SVRAAS_ARTIFACT_ROOT:-/artifacts}"
 CHECK_INTERVAL="${SVRAAS_CHECK_INTERVAL:-60}"
 RETRY_INTERVAL="${SVRAAS_RETRY_INTERVAL:-3600}"
+HEARTBEAT_INTERVAL="${SVRAAS_STATUS_HEARTBEAT_INTERVAL:-60}"
 
 FRED_SERIES_ID="UMCSENT"
 FRED_SERIES_URL="https://api.stlouisfed.org/fred/series"
@@ -16,16 +17,55 @@ if ! [[ "$CHECK_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
     printf 'ERROR: SVRAAS_CHECK_INTERVAL must be a positive integer number of seconds.\n' >&2
     exit 1
 fi
-
 if ! [[ "$RETRY_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
     printf 'ERROR: SVRAAS_RETRY_INTERVAL must be a positive integer number of seconds.\n' >&2
     exit 1
 fi
+if ! [[ "$HEARTBEAT_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'ERROR: SVRAAS_STATUS_HEARTBEAT_INTERVAL must be a positive integer number of seconds.\n' >&2
+    exit 1
+fi
+
+HEARTBEAT_PID=""
+
+publish_status() {
+    local event="$1"
+    shift
+
+    # The reporter is observability only: never change model execution/retries.
+    if ! python3 "$SCRIPT_DIR/status.py" --root "$ARTIFACT_ROOT" "$event" "$@"; then
+        printf 'WARNING: Unable to publish model status event: %s.\n' "$event" >&2
+        return 1
+    fi
+}
+
+heartbeat_loop() {
+    while sleep "$HEARTBEAT_INTERVAL"; do
+        publish_status beat || true
+    done
+}
+
+start_heartbeat() {
+    if [[ -z "$HEARTBEAT_PID" ]]; then
+        heartbeat_loop &
+        HEARTBEAT_PID=$!
+    fi
+}
+
+cleanup_heartbeat() {
+    if [[ -n "$HEARTBEAT_PID" ]]; then
+        kill "$HEARTBEAT_PID" 2>/dev/null || true
+        wait "$HEARTBEAT_PID" 2>/dev/null || true
+    fi
+}
+
+trap cleanup_heartbeat EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 get_fred_latest_month() {
     local response
     local latest_month
-
     if ! response="$(
         printf '%s\n' \
             "url = \"${FRED_SERIES_URL}\"" \
@@ -40,7 +80,6 @@ get_fred_latest_month() {
     )"; then
         return 1
     fi
-
     if ! latest_month="$(
         printf '%s' "$response" |
             python3 -c '
@@ -64,7 +103,6 @@ print(data["seriess"][0]["observation_end"])
 get_latest_completed_month() {
     local latest_month
     local status
-
     latest_month="$(
         python3 - "$ARTIFACT_ROOT" <<'PY'
 import json
@@ -87,7 +125,6 @@ for attempt in range(1, max_attempts + 1):
 
         if not artifacts:
             sys.exit(2)
-
         latest_artifact = os.path.join(
             artifact_root,
             artifacts[-1],
@@ -101,7 +138,6 @@ for attempt in range(1, max_attempts + 1):
             data = json.load(artifact)
 
         latest_month = data["metadata"]["latest_model_month"]
-
         if not isinstance(latest_month, str) or not re.fullmatch(
             r"[0-9]{4}-[0-9]{2}-[0-9]{2}",
             latest_month,
@@ -109,7 +145,6 @@ for attempt in range(1, max_attempts + 1):
             raise ValueError(
                 f"invalid latest_model_month in {latest_artifact}"
             )
-
     except (
         OSError,
         json.JSONDecodeError,
@@ -135,7 +170,6 @@ sys.exit(3)
 PY
     )"
     status=$?
-
     case "$status" in
         0)
             printf '%s\n' "$latest_month"
@@ -155,15 +189,23 @@ run_models() {
 
     printf 'New model data is available. Starting model suite.\n'
 
+    if publish_status begin; then
+        # Do not revive a stale state inherited from a previous runner task.
+        # Start periodic beats only after this task has published its state.
+        start_heartbeat
+    fi
+
     "$SCRIPT_DIR/run_all.sh"
     status=$?
-
     if (( status != 0 )); then
+        publish_status failed --exit-code "$status" \
+            --retry-seconds "$RETRY_INTERVAL" || true
         printf 'ERROR: Model suite failed with exit code %d.\n' \
             "$status" >&2
         return "$status"
     fi
 
+    publish_status ready || true
     printf 'Model suite completed successfully.\n'
 }
 
@@ -172,7 +214,6 @@ while true; do
         "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
     sleep_interval="$CHECK_INTERVAL"
-
     if ! fred_month="$(get_fred_latest_month)"; then
         printf 'ERROR: Unable to determine latest UMCSENT month from FRED.\n' >&2
     else
@@ -183,7 +224,6 @@ while true; do
             0)
                 printf 'FRED latest month:      %s\n' "$fred_month"
                 printf 'Latest completed month: %s\n' "$artifact_month"
-
                 if [[ "$fred_month" > "$artifact_month" ]]; then
                     if ! run_models; then
                         sleep_interval="$RETRY_INTERVAL"
@@ -192,11 +232,13 @@ while true; do
                     fi
                 elif [[ "$fred_month" == "$artifact_month" ]]; then
                     printf 'Model artifacts are current. No run required.\n'
+                    if publish_status ready; then
+                        start_heartbeat
+                    fi
                 else
                     printf 'WARNING: Artifact month is newer than FRED. No run will be started.\n' >&2
                 fi
                 ;;
-
             2)
                 printf 'No completed LSTM artifact found.\n'
 
@@ -206,7 +248,6 @@ while true; do
                         "$sleep_interval" >&2
                 fi
                 ;;
-
             *)
                 printf 'ERROR: Artifact storage could not be read reliably after 3 attempts. No model run will be started.\n' >&2
                 ;;

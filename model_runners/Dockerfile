@@ -57,6 +57,7 @@ COPY mlp/SVR-MLP.R /opt/svraas/model_runners/mlp/SVR-MLP.R
 COPY lstm/SVR-LSTM.R /opt/svraas/model_runners/lstm/SVR-LSTM.R
 COPY --chmod=0755 run_all.sh /opt/svraas/model_runners/run_all.sh
 COPY --chmod=0755 run_forever.sh /opt/svraas/model_runners/run_forever.sh
+COPY --chmod=0755 status.py /opt/svraas/model_runners/status.py
 COPY --chmod=0755 entrypoint.sh /opt/svraas/entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
