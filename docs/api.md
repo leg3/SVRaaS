@@ -12,6 +12,7 @@ The SVRaaS API provides a small HTTP interface between completed model-runner ar
 Its current purpose is to:
 
 - Confirm that configured artifact storage is available.
+- Report advisory model-suite execution state and runner heartbeat freshness.
 - Discover and safely read completed model artifacts.
 - Validate supported artifacts.
 - Identify the newest complete result cohort aligned to one model month.
@@ -23,7 +24,7 @@ The API is intentionally narrow. It does not run models, retrieve source data, o
 
 | Method | Path                 | Purpose                                                   |
 | ------ | -------------------- | --------------------------------------------------------- |
-| `GET`  | `/health`            | Report API and artifact-root availability.                |
+| `GET`  | `/health`            | Report API/storage health and advisory model-suite status. |
 | `GET`  | `/v1/results/latest` | Return the newest complete aligned four-model result set. |
 
 ![SVRaaS Internal API V1 architecture](images/svraas-api-v1-overview.png)
@@ -39,6 +40,7 @@ The API may:
 - Assemble a coherent four-model result set.
 - Return JSON over HTTP.
 - Report whether configured artifact storage is available.
+- Read `status.json` and interpret runner heartbeat freshness without scheduling work.
 
 The API must not:
 
@@ -46,7 +48,7 @@ The API must not:
 - Detect whether new monthly data has been released.
 - Execute any model runner.
 - Coordinate runner execution.
-- Modify or publish artifacts.
+- Modify or publish artifacts or runner status.
 - Return a partial model cohort.
 - Expose arbitrary filesystem paths.
 - Provide public authentication or rate limiting.
@@ -207,13 +209,13 @@ artifact mount: shared NFS read-only
 artifact root: /artifacts
 NFS version: 4.1
 container port: 8000
-published Swarm port: none
+published Swarm port: 8000/TCP via ingress
 image reference: immutable GHCR digest
 ```
 
 The API is stateless and read-only, allowing multiple replicas to serve the same completed artifact set.
 
-The current Swarm stack does not publish port `8000`, so the service remains internal while the website integration boundary is still being designed.
+The current Swarm stack publishes TCP port `8000` using Swarm ingress and attaches the API to the external `api-php-bridge` overlay network. The Aurora-Solaria PHP integration uses the internal service network. An ingress-published port is not equivalent to internet exposure: actual reachability depends on host/network firewalls. The API does not itself provide TLS, authentication, or rate limiting; restrict direct access to trusted networks.
 
 ## Artifact expectations
 
@@ -256,6 +258,8 @@ Metadata used by the repository and result-set service includes:
 - `latest_model_month`
 
 Malformed JSON, unsupported schema versions, incorrect model identities, missing required sections, and incomplete artifacts cannot participate in a returned cohort.
+
+`status.json` is operational metadata, not a forecasting artifact. Artifact discovery explicitly excludes it from candidate model JSON files.
 
 Artifact filenames are an internal repository concern, not part of the HTTP contract.
 
@@ -330,70 +334,115 @@ Binding to `127.0.0.1` keeps the development service on the local machine. Stop 
 
 ## `GET /health`
 
-### Health Endpoint Purpose
+### Purpose and health semantics
 
-`GET /health` verifies that:
+`GET /health` reports two separate concerns:
 
-- The API process is responding.
-- Startup configuration loaded successfully.
-- The configured artifact root exists.
-- The configured artifact root is readable.
+1. **API/storage availability:** The top-level `status` and `checks.artifact_root` verify that the artifact root exists and can actually be read (including an NFS directory enumeration).
+2. **Advisory runner state:** `model_suite` interprets the optional `/artifacts/status.json` written by the persistent runner. The API never starts or retries models.
 
-A served health response implies that the API configuration was parsed successfully.
+The top-level HTTP response remains `200` when storage is readable, even if the model suite is `building`, `failed`, or `unknown`. It returns `503` when artifact storage is unavailable. A complete model cohort is **not** required for `/health` to be healthy; result availability is checked separately with `/v1/results/latest`.
 
-The endpoint does not require model artifacts to exist. An existing, readable, but empty artifact root is healthy.
+### Example: current artifacts and live runner
 
-### Healthy response
-
-Status:
-
-```text
-HTTP 200
-```
-
-Body:
+Illustrative response based on the status observed in production on November 7, 2026 (`checked_at` is an example timestamp):
 
 ```json
 {
   "status": "ok",
   "service": "svraas-api",
+  "checked_at": "2026-11-07T19:40:04Z",
   "checks": {
     "artifact_root": {
+      "status": "ok",
       "exists": true,
       "readable": true
     }
+  },
+  "model_suite": {
+    "state": "ready",
+    "reported_state": "ready",
+    "heartbeat_fresh": true,
+    "updated_at_utc": "2026-11-07T19:39:07Z",
+    "heartbeat_at_utc": "2026-11-07T19:39:07Z",
+    "heartbeat_age_seconds": 57
   }
 }
 ```
 
-### Unavailable artifact-root response
+The API provides `checked_at` for each response. Exact timestamps and optional model-suite fields vary with the state; the example above illustrates the response shape, not a fixed payload.
 
-Status:
+### Model-suite states
 
-```text
-HTTP 503
-```
+| `model_suite.state` | Interpretation |
+| --- | --- |
+| `building` | A model suite is executing; `current_model` identifies the active stage when available. |
+| `ready` | The runner reports current completed artifacts; it need not imply a rebuild just occurred. |
+| `failed` | The last execution attempt failed; an automatic retry may be scheduled. |
+| `unknown` | Status is missing, invalid, unavailable, or its heartbeat is not fresh enough to confirm runner reporting. |
 
-Body:
+`reported_state`, when present, preserves the last state in the status file, even when the API changes the effective `state` to `unknown` because of heartbeat freshness.
+
+### Heartbeat freshness and diagnostic fields
+
+The runner's default heartbeat interval is **60 seconds**, configured by `SVRAAS_STATUS_HEARTBEAT_INTERVAL`. The API considers a heartbeat **stale after 300 seconds**. A timestamp more than 60 seconds ahead of the API clock is treated as a future heartbeat and does not count as fresh; smaller clock skew is tolerated.
+
+The API may expose these fields when reported by the runner:
+
+| Field | Meaning |
+| --- | --- |
+| `reported_state` | Last valid state from the runner's status file |
+| `heartbeat_fresh` | Whether the runner heartbeat passed freshness checks |
+| `heartbeat_at_utc`, `heartbeat_age_seconds` | Last heartbeat timestamp and computed age |
+| `current_model` | Active model during a build (`SVR-AR`, `SVR-ARIMA`, `SVR-MLP`, `SVR-LSTM`) |
+| `started_at_utc`, `stage_started_at_utc`, `updated_at_utc` | Build, stage, and status-transition timestamps |
+| `completed_at_utc` | Completion time when an actual build completed; not fabricated for pre-existing artifacts |
+| `failed_model`, `error_code`, `exit_code`, `message` | Sanitized model-execution failure information |
+| `retry.scheduled`, `retry.next_attempt_at_utc` | Whether and when another execution attempt is planned |
+| `reason` | Reason the effective state is `unknown` |
+
+The currently defined `reason` values are `missing_status`, `invalid_status`, `stale_heartbeat`, `future_heartbeat`, and `artifact_root_unavailable`.
+
+For example, a runner interruption after a completed suite can produce:
 
 ```json
 {
-  "status": "error",
-  "service": "svraas-api",
-  "checks": {
-    "artifact_root": {
-      "exists": false,
-      "readable": false
-    }
+  "state": "unknown",
+  "reported_state": "ready",
+  "heartbeat_fresh": false,
+  "reason": "stale_heartbeat"
+}
+```
+
+This **does not** invalidate completed result artifacts. A fresh heartbeat also does not prove that an individual R computation is making progress; it confirms the runner's reporting mechanism is active.
+
+### Missing or unavailable status
+
+If storage is readable but no `status.json` exists, `/health` returns HTTP `200` with:
+
+```json
+{
+  "model_suite": {
+    "state": "unknown",
+    "heartbeat_fresh": false,
+    "reason": "missing_status"
   }
 }
 ```
 
-An existing but unreadable root may report `exists: true` and `readable: false`.
+If the artifact root itself is missing or unreadable, `/health` returns HTTP `503`, top-level `status: "error"`, and `checks.artifact_root.status: "error"`. The advisory `model_suite` reports `unknown` with `reason: "artifact_root_unavailable"`.
 
-The response must never contain the configured filesystem path.
+A valid but stale or failed runner state must **not** change the top-level HTTP status. The configured filesystem path must never appear in the response.
 
-A missing root does not have to prevent the API process from starting. The running service can report the storage failure through `/health`.
+### Manual verification
+
+From an authorized network with access to Swarm ingress, query any reachable Swarm node, for example:
+
+```bash
+curl -i http://voodoo0x15:8000/health
+```
+
+The path is `/health`, **not** `/v1/health`. Direct TCP/8000 access should remain restricted by network and firewall policy. For an internal container, `http://127.0.0.1:8000/health` is also valid.
 
 ## `GET /v1/results/latest`
 
@@ -544,19 +593,12 @@ The current suite covers:
 - Artifact validation.
 - Latest complete result-set construction.
 - Live endpoint behavior.
+- Model-suite status parsing, timestamps, and heartbeat freshness.
+- Exclusion of `status.json` from model artifact discovery.
 
-The completed validation snapshot contains:
+The original API V1 suite completed 63 assertions before the model-status extension. The additional `test-model-suite-health.R` coverage was validated as part of the full updated test suite on November 7, 2026; the old count is not the current total.
 
-| Test area           | Assertions |
-| ------------------- | ---------: |
-| API endpoints       |         22 |
-| Artifact discovery  |          1 |
-| Artifact parsing    |          5 |
-| Artifact validation |         24 |
-| Latest result set   |         11 |
-| **Total**           |     **63** |
-
-The endpoint integration tests cover four cases:
+The original endpoint integration tests cover four cases:
 
 1. `/health` returns `200` for a readable artifact root.
 2. `/health` returns `503` for a missing artifact root.
@@ -641,7 +683,7 @@ That validation confirmed:
 - The result contained the expected keys:
   `ar`, `arima`, `mlp`, and `lstm`.
 
-The final automated suite then passed all 63 assertions, including all 22 endpoint assertions.
+At that point, the original automated suite passed all 63 assertions, including the 22 endpoint assertions. The subsequently released model-status tests expand that earlier baseline.
 
 ## Security and deployment assumptions
 
@@ -657,11 +699,9 @@ It currently provides no:
 
 It must not be exposed directly to the public internet in its present form.
 
-The current Swarm stack does not publish the API's container port externally.
+The current Swarm stack publishes port `8000/TCP` through ingress. This is network reachability, **not** an authorization boundary, and must not be assumed to be inaccessible from untrusted networks without verifying firewall rules.
 
-The deployed API mounts the shared artifact store read-only.
-
-Website routing and any additional access controls belong at the eventual website integration boundary.
+The deployed API mounts the shared artifact store read-only. Aurora-Solaria connects through the shared `api-php-bridge` overlay network; website routing and access controls remain separate from the API implementation.
 
 Filesystem paths are internal implementation details and must never appear in HTTP responses.
 
@@ -675,6 +715,8 @@ Future changes should preserve these rules unless the API contract is deliberate
 - The repository receives its root through dependency injection.
 - Repository methods do not depend on the current working directory.
 - `/health` does not require a complete model cohort.
+- Advisory `model_suite` failures or staleness do not determine top-level API health.
+- The API never writes `status.json`, starts models, or changes retries.
 - An empty but readable artifact root remains healthy.
 - Result-set logic remains outside the HTTP route.
 - A successful result contains all four expected models.
@@ -697,9 +739,8 @@ The following items are intentionally outside API V1:
 - Standalone metrics endpoints.
 - Authentication.
 - Rate limiting.
-- Website integration.
 - OpenAPI customization.
-- Additional status endpoints.
+- Additional status endpoints (the existing `/health` already includes model-suite diagnostics).
 - Administrative endpoints.
 - Model execution.
 - FRED release detection.

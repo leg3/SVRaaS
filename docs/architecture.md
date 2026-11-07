@@ -12,7 +12,7 @@ Its purpose is to turn the AR, ARIMA, MLP, and LSTM research workflows into a ro
 
 The architecture separates:
 
-- model execution and refresh monitoring
+- model execution, refresh monitoring, and build-status reporting
 - shared artifact storage
 - internal read-only API serving
 - website presentation
@@ -36,7 +36,7 @@ SVRaaS currently consists of three Docker Swarm service layers:
                    ↓
         AR → ARIMA → MLP → LSTM
                    ↓
-            JSON artifacts
+       JSON artifacts + status.json
                    ↓
        NFS-Ganesha artifact store
              Swarm service
@@ -48,25 +48,26 @@ SVRaaS currently consists of three Docker Swarm service layers:
              Swarm service
              replicas: 3
                    ↓
-       future website integration
+       Aurora-Solaria PHP bridge / dashboard
 ```
 
 The three implemented service responsibilities are intentionally distinct:
 
 ```text
 runner
-  computes and writes model results
+  computes and writes model results; publishes status.json
 
 storage
   provides shared artifact storage
 
 API
   reads, validates, and serves completed results
+  interprets runner status and heartbeat freshness
 ```
 
-The website integration boundary has not yet been implemented.
+The Aurora-Solaria website consumes the internal API through a PHP bridge on the shared `api-php-bridge` Swarm overlay network. No model calculation occurs in the website.
 
-The current API is an internal service. Its container listens on port `8000`, but the current API Swarm stack does not publish that port externally.
+The API container listens on port `8000`, and the current Swarm stack **also publishes TCP/8000 in ingress mode**. Application-level authentication and TLS are not supplied by this internal API; verify and restrict external reachability with network/firewall controls.
 
 ---
 
@@ -80,6 +81,7 @@ The model runner owns:
 - deciding whether a model refresh is needed
 - executing the model suite
 - writing completed JSON artifacts
+- publishing model-suite transitions and runner heartbeat to `status.json`
 
 The internal API owns:
 
@@ -88,6 +90,7 @@ The internal API owns:
 - assembling a coherent four-model result set
 - returning JSON
 - reporting whether artifact storage is available
+- interpreting advisory runner status and heartbeat freshness
 
 The API must not:
 
@@ -238,6 +241,41 @@ A single runner instance therefore does not continue polling or launch another m
 
 ---
 
+## Model-Suite Status and Heartbeat (November 2026)
+
+The runner and API communicate operational state through **`/artifacts/status.json`** on the existing NFS artifact store:
+
+```text
+single-replica runner
+  |   status.py writes atomically (read/write NFS)
+  v
+/artifacts/status.json
+  |   API reads only (read-only NFS)
+  v
+GET /health → model_suite
+```
+
+The status file is **not** a model-result artifact and is excluded from `/v1/results/latest` artifact discovery. No database, message broker, new HTTP route, or extra Swarm service is required.
+
+- `model_runners/run_forever.sh` publishes suite transitions, starts a background heartbeat after this runner has successfully published its own initial state, and retains the existing FRED polling and retry decisions.
+- `model_runners/run_all.sh` reports the active model when each `Rscript` stage starts: AR → ARIMA → MLP → LSTM.
+- `model_runners/status.py` serializes concurrent runner-local status changes using a local lock and writes JSON via a temporary file plus atomic replacement on the same filesystem. Only the single runner writes.
+- The API's `api/R/health.R` reads status independently of artifact-cohort selection and evaluates heartbeat freshness.
+
+Status transitions are `building` → `ready` on success or `building` → `failed` on a model error; an automatic retry can return `failed` → `building`. `ready` can also be published when existing artifacts are already current, without claiming that a new build just completed.
+
+The heartbeat defaults to **60 seconds** (`SVRAAS_STATUS_HEARTBEAT_INTERVAL=60`), even while a model is running or the runner sleeps between retries. An API read more than **300 seconds** after the last heartbeat reports effective state `unknown` and preserves `reported_state` when valid. The runner cannot write failure state if its host suddenly disappears; the stale heartbeat is how an interruption becomes visible.
+
+**Health is not a single boolean:** API/storage health, completed result-cohort availability, and runner liveness are separate. A stale heartbeat does not erase previously completed artifacts, and a fresh heartbeat alone does not establish forward progress inside an R model. The API retains HTTP `200` when storage is readable, even if `model_suite` reports `failed` or `unknown`; `/v1/results/latest` independently requires a complete aligned cohort.
+
+Failure reporting includes the failed model (when known), exit code, a sanitized error code/message, and an optional `retry.next_attempt_at_utc`. Status-reporting failures warn without intentionally aborting model execution. The runner is still single-replica; concurrent writers on different nodes are not part of this design.
+
+Production verification on November 7, 2026 confirmed API `0.1.2` (3/3 replicas), runner `0.1.1` (1/1), a `ready` suite, and live heartbeat advancement from `19:41:09Z` to `19:42:09Z`. Real production model failure/rebuild and host interruption scenarios have **not** yet been exercised since this feature's release; integration tests cover simulated transitions and recovery cases.
+
+See [API documentation](api.md) for response fields, reason codes, and operational interpretation.
+
+---
+
 ## Model Data Window
 
 The deployed model workflows are no longer limited to the original fixed capstone end date.
@@ -300,7 +338,7 @@ from the newest completed LSTM artifact when determining whether the model suite
 
 The API uses the model month to identify a coherent completed AR, ARIMA, MLP, and LSTM cohort.
 
-The current architecture does not use a published manifest, hash-addressed bundle, `current/` directory, or `latest.json` publication layer.
+The current architecture does not use a published manifest, hash-addressed bundle, `current/` directory, or `latest.json` publication layer. The separate `status.json` is operational runner metadata, not a cohort-selection manifest.
 
 A different cohort-discovery mechanism could be introduced later if it provides a clear operational benefit, but it is not required by the current architecture.
 
@@ -454,7 +492,7 @@ An immediate second access succeeded.
 
 Testing showed that the behavior was attempt-specific rather than delay-specific, and it was reproduced through more than one client access method.
 
-The underlying cause has not been established.
+The later investigation isolated a Linux NFSv4 client directory-delegation interaction with this NFS-Ganesha deployment; disabling directory delegations was validated as a workaround across the Swarm nodes. See the host-level configuration notes for the exact mitigation.
 
 The runner therefore protects the complete artifact-read operation with up to three immediate attempts.
 
@@ -484,9 +522,7 @@ This distinction is important because an unreadable artifact store must not acci
 
 Without that protection, a transient NFS failure could incorrectly trigger an expensive four-model regeneration.
 
-The observed first-access behavior remains an operational investigation item.
-
-No specific Docker Engine, kernel, operating system, or NFS-client version has been established as the cause.
+The first-access failure was reproducible with Ubuntu 26.04-era NFSv4 client behavior and was resolved in validation by setting `directory_delegations=N` on the clients. Preserve that host-side mitigation until a separately validated NFS-Ganesha upgrade replaces it.
 
 ---
 
@@ -543,6 +579,12 @@ The runner Dockerfile remains the source of truth for the exact TensorFlow wheel
 ## Docker Swarm Deployment
 
 SVRaaS currently deploys storage, runner, and API as separate Swarm stacks.
+
+**Release procedure:** Build and validate images locally, publish version tags to GHCR, verify registry digests, and commit those **immutable digests** to the component stack manifests. Updating a Git branch or pushing an image does not itself change an existing Swarm service. Deploy the API first and verify `/health` plus `/v1/results/latest` before updating the single-replica runner. Keep the previous registry digests available for rollback. No storage image change was required for the November 2026 status release.
+
+Use `docker stack deploy --detach=false` if the command should wait for convergence; the default detached behavior can return while old and new tasks coexist. Even after completion, verify `docker service inspect ... --format '{{json .UpdateStatus}}'`, task image digests, replica counts, and application health. Runner update failures use `pause` rather than the API's `rollback` behavior.
+
+Ansible-managed node updates and reboots on November 7, 2026 generated historic Swarm task failures (including exit 137) and temporary NFS mount failures. The services recovered, which highlighted the need to distinguish node recovery, runner heartbeat loss, model rebuilds, and valid completed artifacts. Diagnose live task state rather than treating historical failure entries as present outages.
 
 This keeps the three service responsibilities independently deployable while the architecture is still evolving.
 
@@ -604,7 +646,7 @@ artifact mount: shared NFS read-only
 artifact root: /artifacts
 NFS version: 4.1
 container port: 8000
-published Swarm port: none
+published Swarm port: 8000/TCP via ingress
 image reference: immutable GHCR digest
 ```
 
@@ -685,9 +727,7 @@ The service binds Plumber2 to:
 0.0.0.0:8000
 ```
 
-Port `8000` is exposed by the container image but is not currently published by the API Swarm stack.
-
-This preserves the API as an internal service until the website integration boundary is deliberately implemented.
+Port `8000` is exposed by the container image and published through Swarm ingress; the API is additionally attached to `api-php-bridge` for the Aurora-Solaria PHP bridge. The API has no built-in TLS/authentication. Restrict direct ingress access using network/firewall controls; a published port does not imply that it is publicly reachable.
 
 ---
 
@@ -740,19 +780,21 @@ This confirms the intended recovery property of the architecture: an empty artif
 
 ## Website Integration
 
-The next system-level boundary is integration between the internal SVRaaS API and the website presentation layer.
+The SVRaaS API and the Aurora-Solaria website now communicate through the internal PHP bridge.
 
 The `aurora-solaria` website remains the intended consumer of completed SVR results.
 
-Its eventual SVR responsibilities may include:
+The website's SVR responsibilities include:
 
-- hosting the public dashboard and research page
+- hosting the public dashboard and research material
 - rendering charts and tables
-- consuming completed model results
+- consuming completed model results through PHP/API integration
 - presenting model and methodology information
 - avoiding direct model execution
 
-The specific network and application boundary between `aurora-solaria` and the internal API has not yet been implemented.
+Displaying `model_suite` diagnostics on the dashboard is a separate presentation-layer decision; it was not part of the SVRaaS status release.
+
+The PHP integration uses the shared `api-php-bridge` overlay network, allowing website PHP code to call the Swarm API service without giving the website direct access to NFS storage.
 
 That integration should preserve the existing architecture rule:
 
@@ -774,12 +816,11 @@ The following remain possible future improvements:
 - a unified SVRaaS Swarm stack containing storage, runner, and API
 - a cold-reset wrapper for repeatable removal of SVRaaS stacks and node-local volumes
 - clearer naming between storage backing volumes and NFS client volumes
-- explicit `SIGTERM` and `SIGINT` handling in `run_forever.sh`
+- further evaluation of signal propagation during interrupted, long-running `Rscript` subprocesses
 - stronger dependency and image-version pinning where useful
-- semantic runner and API image releases
-- further investigation of the first-access NFS behavior
+- validation of an upgraded NFS-Ganesha image and eventual removal of the client directory-delegation workaround
 - an explicit cohort manifest or other publication mechanism if operationally useful
-- integration with the `aurora-solaria` dashboard frontend
+- presentation of optional runner health/build diagnostics within the `aurora-solaria` dashboard
 
 Future components should not be described as current behavior until they have been implemented and validated.
 

@@ -15,6 +15,7 @@ The current implementation:
 - exports dashboard-ready JSON artifacts
 - stores completed artifacts on shared NFS-backed storage
 - serves completed four-model result sets through an internal read-only API
+- reports runner build status and a heartbeat through `GET /health`
 
 The resulting JSON artifacts are intended to be consumed by the website-serving infrastructure without exposing model execution or shared artifact storage directly.
 
@@ -65,6 +66,8 @@ The API runs independently of the model runner, mounts the shared artifact store
 
 The deployed API uses three replicas and remains stateless so multiple API tasks can serve the same completed artifact set.
 
+The runner writes `/artifacts/status.json`; the API reads it as advisory `model_suite` status in `/health`. Missing or stale status does not invalidate completed model results or make otherwise healthy artifact storage unavailable. See `docs/api.md` and `docs/architecture.md`.
+
 The API currently exposes:
 
 ```text
@@ -76,15 +79,15 @@ The API does not fetch FRED data, execute models, decide when models should refr
 
 ### Next
 
-The next major integration step is connecting the website-serving infrastructure to the internal API so the SVR dashboard can consume completed JSON results.
+The internal Aurora-Solaria PHP bridge is implemented on the shared `api-php-bridge` network. A possible next step is presenting model-suite diagnostics in the website dashboard.
 
-The specific website-to-API integration mechanism has not yet been implemented.
+The API's TCP port `8000` is published through Swarm ingress; access must be limited at the network/firewall boundary because the API does not provide authentication or TLS.
 
 ### Future
 
 Possible future work includes:
 
-- integration with the `aurora-solaria` dashboard frontend
+- display of optional model build-status diagnostics on the dashboard
 - a unified SVRaaS Swarm stack
 - additional deployment and reproducibility improvements
 - additional operational tooling and validation
@@ -106,7 +109,7 @@ The storage and runner architecture has been validated through a clean cold-star
 
 The internal Plumber2 API is also containerized and deployed through Docker Swarm against the shared artifact store using read-only NFS access.
 
-The remaining system-level work is integrating the internal API with the website presentation layer.
+The internal PHP-to-API bridge is implemented; the model-suite status response has been production-validated with a fresh runner heartbeat.
 
 ## Design Notes
 
@@ -116,7 +119,7 @@ Detailed architecture and implementation documentation is maintained under:
 docs/
 ```
 
-The documentation covers model execution, refresh behavior, shared artifact storage, Docker Swarm deployment, API responsibilities, and the boundary between SVRaaS and future website integration.
+The documentation covers model execution, refresh behavior, model-suite heartbeat status, shared artifact storage, Docker Swarm deployment, API responsibilities, and the implemented website integration boundary.
 
 ## Related Research Repositories
 
